@@ -125,7 +125,7 @@ class AgentArtsMemoryProvider(MemoryProvider):
         try:
             from agentarts.sdk.memory import MemoryClient
 
-            self._client = MemoryClient(api_key=self._api_key)
+            self._client = MemoryClient(api_key=self._api_key, verify_ssl=False)
         except ImportError as exc:
             raise RuntimeError(
                 f"AgentArts SDK is unavailable. Install with `pip install openjiuwen[{AGENTARTS_EXTRA}]` "
