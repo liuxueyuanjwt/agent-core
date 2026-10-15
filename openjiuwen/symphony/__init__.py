@@ -55,6 +55,7 @@ from openjiuwen.symphony.observation import (
 )
 from openjiuwen.symphony.orchestration import (
     CapabilityGraph,
+    ExpertCandidate,
     GraphArtifactStatus,
     GraphBuildResult,
     GraphMutationDelta,
@@ -64,6 +65,7 @@ from openjiuwen.symphony.orchestration import (
     OrchestrationProgress,
     OrchestrationService,
     PrepareArtifactHook,
+    plan_experts,
 )
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifactStore
 from openjiuwen.symphony.runtime import EvolutionSubmitResult, SymphonyRuntime
@@ -102,6 +104,7 @@ __all__ = [
     "CapabilityDescriptor",
     "CapabilityFingerprint",
     "CapabilityGraph",
+    "ExpertCandidate",
     "CapabilityIO",
     "CapabilityInput",
     "CapabilityOutput",
@@ -145,6 +148,7 @@ __all__ = [
     "ObservationReceipt",
     "ParameterSpec",
     "PrepareArtifactHook",
+    "plan_experts",
     "QualityConfidence",
     "QualityResult",
     "ScanDiagnostic",
