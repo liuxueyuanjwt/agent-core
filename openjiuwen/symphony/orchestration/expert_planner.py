@@ -49,6 +49,8 @@ def _validate_candidates(candidates: Sequence[ExpertCandidate]) -> dict[str, Exp
     return indexed
 
 
+# Keep candidate, edge, and DAG validation together before constructing the public graph.
+# pylint: disable-next=too-many-locals
 def _validate_plan(raw: Any, candidates: dict[str, ExpertCandidate]) -> OrchestrationPlan:
     if not isinstance(raw, dict):
         raise ValueError("expert plan must be a JSON object")
