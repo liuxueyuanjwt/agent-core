@@ -72,13 +72,9 @@ def _validate_plan(raw: Any, candidates: dict[str, ExpertCandidate]) -> Orchestr
         if not isinstance(item, dict):
             raise ValueError("invalid expert plan node")
         expert_id, task = item.get("id"), item.get("task")
-        if (
-            not isinstance(expert_id, str)
-            or expert_id not in candidates
-            or expert_id in nodes
-            or not isinstance(task, str)
-            or not task.strip()
-        ):
+        if not isinstance(expert_id, str) or expert_id not in candidates or expert_id in nodes:
+            raise ValueError("expert plan contains an unknown, duplicate, or empty-task expert")
+        if not isinstance(task, str) or not task.strip():
             raise ValueError("expert plan contains an unknown, duplicate, or empty-task expert")
         candidate = candidates[expert_id]
         nodes[expert_id] = {
