@@ -125,4 +125,4 @@ class TestCleanupExpiredDatedLogDirs:
 
 
 def test_default_max_bytes_matches_desktop():
-    assert DEFAULT_MAX_BYTES == 2 * 1024 * 1024
+    assert DEFAULT_MAX_BYTES == 10 * 1024 * 1024

@@ -29,7 +29,9 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_MAX_BYTES = 2 * 1024 * 1024
+# 日内上限 10MB 对齐桌面端 logger.ts 的 MAX_BYTES 与 jiuwenswarm 侧
+# utils._LOG_DATED_MAX_BYTES（2MB 时滚动过于频繁，排障窗口太短）。
+DEFAULT_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_RETENTION_DAYS = 90
 
 _DATED_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
