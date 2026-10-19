@@ -1002,6 +1002,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             tool_name, tool_args, result, permission_config=self._engine.config,
             workspace=self._approval_workspace(),
         )
+        subject = operation_subject(
+            self._normalize_tool_name(tool_name), tool_args, self._engine.config, self._approval_workspace())
         return {
             "ask_category": presentation.category,
             "ask_title": presentation.title,
@@ -1012,8 +1014,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 for path, action, source in presentation.file_operations
             ],
             "matched_rule": result.matched_rule or "",
-            "authorization_scopes": scope_options(operation_subject(
-                self._normalize_tool_name(tool_name), tool_args, self._engine.config, self._approval_workspace())),
+            # Capture the execution directory before the interrupt changes context.
+            "workdir": subject.get("cwd", ""),
+            "authorization_scopes": scope_options(subject),
         }
 
     def _build_always_allow_hint(self, tool_call: Optional[ToolCall]) -> str:
