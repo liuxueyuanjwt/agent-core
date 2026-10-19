@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from openjiuwen.symphony import ExpertCandidate, plan_experts
+from openjiuwen.symphony import ExpertCandidate, OrchestrationPlan, plan_experts
 
 
 def _candidates(*ids: str) -> list[ExpertCandidate]:
@@ -130,3 +130,80 @@ async def test_duplicate_candidate_ids_are_rejected_before_model_call():
     with pytest.raises(ValueError, match="unique"):
         await plan_experts("任务", _candidates("a", "a"), model)
     assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_seven_experts_and_duplicate_edges_preserve_mapping_contract():
+    candidate_ids = [str(index) for index in range(7)]
+    model = FakeModel(
+        {
+            "status": "ready",
+            "nodes": [{"id": expert_id, "task": " 整理资料 "} for expert_id in candidate_ids],
+            "edges": [{"source": "0", "target": "1"}, {"source": "0", "target": "1"}],
+        }
+    )
+
+    plan = await plan_experts(" 完成报告 ", _candidates(*candidate_ids), model, timeout=12.5)
+
+    assert isinstance(plan, OrchestrationPlan)
+    assert isinstance(plan, dict)
+    result = plan.to_dict()
+    assert result == plan and result is not plan
+    graph = result["graph"]
+    assert len(graph["id"]) == 32
+    assert len(graph["nodes"]) == 7
+    assert all(node["task"] == "整理资料" for node in graph["nodes"].values())
+    assert graph["edges"] == [{"source": "0", "target": "1", "relation": "can_feed"}]
+    assert graph["metadata"] == {
+        "status": "ready",
+        "missing_inputs": [],
+        "leader": {"id": "xiaoyiwork", "label": "小艺Work", "role": "lead"},
+    }
+    assert len(model.calls) == 1
+    assert model.calls[0]["timeout"] == 12.5
+    content = json.loads(model.calls[0]["messages"][1]["content"])
+    assert content["query"] == "完成报告"
+    assert all(expert["skills"] == [] for expert in content["experts"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", [None, "", " \t"])
+async def test_invalid_query_is_rejected_before_model_call(query):
+    model = FakeModel({"status": "no_plan"})
+    with pytest.raises(ValueError, match="non-empty query"):
+        await plan_experts(query, _candidates("a"), model)
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "candidates",
+    [[{"id": "a"}], [ExpertCandidate(" ", "专家", "职责")], [ExpertCandidate("a", " ", "职责")]],
+)
+async def test_invalid_candidate_is_rejected_before_model_call(candidates):
+    model = FakeModel({"status": "no_plan"})
+    with pytest.raises(ValueError, match="expert candidates"):
+        await plan_experts("整理资料", candidates, model)
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_model_is_required_only_when_candidates_are_available():
+    assert await plan_experts("整理资料", [], None) == {"status": "no_plan"}
+    with pytest.raises(ValueError, match="current request model"):
+        await plan_experts("整理资料", _candidates("a"), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"status": "ready", "nodes": [{"id": "a", "task": " "}], "edges": []},
+        {"status": "ready", "nodes": [{"id": "a", "task": "A"}], "edges": None},
+        {"status": "ready", "nodes": [{"id": "a", "task": "A"}], "edges": [{"source": "a", "target": "b"}]},
+    ],
+)
+async def test_invalid_plan_structure_is_rejected(payload):
+    with pytest.raises(ValueError):
+        await plan_experts("整理资料", _candidates("a", "b"), FakeModel(payload))
