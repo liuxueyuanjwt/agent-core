@@ -91,6 +91,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         llm: Any = None,
         model_name: str | None = None,
         host: ToolPermissionHost | None = None,
+        soft_delete_enabled: Any = None,
     ) -> None:
         super().__init__(tool_names=tool_names)
         self._static_config = cast(dict[str, Any], config or {})
@@ -124,6 +125,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 workspace_root=workspace_root,
                 trusted_dirs=trusted_dirs,
                 immutable_control_roots=immutable_control_roots,
+                soft_delete_enabled=soft_delete_enabled,
             )
         if self._host.tool_permission_checks_active is not None:
             self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
@@ -268,11 +270,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         self,
         config: PermissionsSection | dict[str, Any],
         tool_names: Optional[Iterable[str]] = None,
+        *,
+        soft_delete_enabled: Any = None,
     ) -> None:
         """Hot-update static permission config；可选 ``tool_names`` 仅更新基类标签集合。"""
         cfg_dict = cast(dict[str, Any], config)
         self._static_config = cfg_dict
-        self._engine.update_config(cfg_dict)
+        self._engine.update_config(cfg_dict, soft_delete_enabled=soft_delete_enabled)
         if self._host.tool_permission_checks_active is not None:
             self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
         if tool_names is not None:

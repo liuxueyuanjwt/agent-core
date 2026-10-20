@@ -144,6 +144,14 @@ class ShellGuardSection(TypedDict, total=False):
     interpreter_sink: bool
 
 
+class SoftDeleteSection(TypedDict, total=False):
+    """软删除与批量删除审批。``enabled`` 为真时删除进回收站/归档，并按数量审批。"""
+
+    enabled: bool
+    archive_dir: NotRequired[str]
+    batch_delete_threshold: NotRequired[int]  # 一次 shell 删除达到该文件数则 ASK；缺省 100，0 关闭计数
+
+
 class PermissionsSection(TypedDict, total=False):
     """与 agent YAML 中 ``permissions:`` 段落常见字段对齐的结构说明。
 
@@ -191,11 +199,13 @@ class PermissionsSection(TypedDict, total=False):
     file_guard: NotRequired[FileGuardSection]
     net_guard: NotRequired[NetGuardSection]
     shell_guard: NotRequired[ShellGuardSection]
+    soft_delete: NotRequired[SoftDeleteSection]
     external_directory: NotRequired[dict[str, str]]  # deprecated → file_guard
 
 
 __all__ = [
     "ApprovalOverrideEntry",
+    "SoftDeleteSection",
     "FileGuardDefaults",
     "FileGuardPathEntry",
     "FileGuardSection",

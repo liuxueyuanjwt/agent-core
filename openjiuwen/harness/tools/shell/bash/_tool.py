@@ -42,6 +42,7 @@ from openjiuwen.harness.tools.filesystem import (
     _parse_rm_targets,
     _record_rm_targets_before_deletion,
 )
+from openjiuwen.core.sys_operation.local.file_backup import resolve_file_backup_manager
 
 # Matches sudo not already followed by -n / -En / --non-interactive
 _SUDO_NEEDS_N_RE = re.compile(
@@ -52,6 +53,32 @@ _SUDO_NEEDS_N_RE = re.compile(
 def _make_sudo_noninteractive(command: str) -> str:
     """Inject -n into sudo calls so they fail fast instead of hanging for a password."""
     return _SUDO_NEEDS_N_RE.sub("sudo -n", command)
+
+
+async def _backup_shell_writes(command: str, workdir: str, shell_type: str) -> None:
+    """执行前对命令里词法可识别的写路径做快照备份（幂等，失败不阻断）。"""
+    manager = resolve_file_backup_manager()
+    if manager is None or not manager.enabled:
+        return
+    try:
+        from openjiuwen.harness.security.permission_engine.fileguard.path_extract import (
+            extract_shell_path_accesses,
+        )
+
+        accesses = extract_shell_path_accesses(
+            command, workdir, include_cd_reads=False, shell_type=shell_type,
+        )
+    except (OSError, RuntimeError, ValueError):
+        return
+    for path, action in accesses:
+        if action != "write":
+            continue
+        try:
+            await manager.backup_before_write(str(path))
+        except Exception:  # noqa: BLE001
+            sys_operation_logger.warning(
+                "[BashTool] backup_before_write failed path=%s", path, exc_info=True,
+            )
 
 
 _VALID_SHELL_TYPES = frozenset({"auto", "cmd", "powershell", "bash", "sh"})
@@ -209,6 +236,9 @@ class BashTool(Tool):
             if rm_targets:
                 await _record_rm_targets_before_deletion(_history_path, rm_targets, self._operation)
 
+        # ── pre-execution: snapshot files written by the shell command ─────────
+        await _backup_shell_writes(p.command, resolved_cwd, p.shell_type)
+
         # ── normal execution ──────────────────────────────────
         res = await self._operation.shell().execute_cmd(
             p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
@@ -293,6 +323,9 @@ class BashTool(Tool):
             rm_targets = _parse_rm_targets(p.command)
             if rm_targets:
                 await _record_rm_targets_before_deletion(_history_path, rm_targets, self._operation)
+
+        # ── pre-execution: snapshot files written by the shell command ─────────
+        await _backup_shell_writes(p.command, resolved_cwd, p.shell_type)
 
         start = time.monotonic()
         accumulated_stdout = ""

@@ -26,6 +26,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 
+from openjiuwen.harness.security.permission_engine.delguard.deletion_guard import (
+    DeletionGuard,
+    build_deletion_guard,
+)
 from openjiuwen.harness.security.permission_engine.fileguard.file_guard import (
     FileGuardChecker,
     build_file_guard_checker,
@@ -173,6 +177,7 @@ class PermissionEngine:
         workspace_root: Path | None = None,
         trusted_dirs: list[Path] | None = None,
         immutable_control_roots: list[Path] | None = None,
+        soft_delete_enabled: Any = None,
     ):
         # 运行时为可变 dict；TypedDict 仅作入参形状说明
         self.config: dict[str, Any] = prepare_permissions_for_engine(config)
@@ -183,6 +188,7 @@ class PermissionEngine:
         self._workspace_root = workspace_root
         self._trusted_dirs = trusted_dirs or []
         self._immutable_control_roots = immutable_control_roots or []
+        self._soft_delete_enabled_provider: Any = soft_delete_enabled
         self._immutable_control_guard = ImmutableControlPlaneGuard(
             self._immutable_control_roots,
             workspace_root=self._workspace_root,
@@ -194,6 +200,11 @@ class PermissionEngine:
             trusted_dirs=self._trusted_dirs,
         )
         self._net_guard: NetGuardChecker | None = build_net_guard_checker(self.config)
+        self._deletion_guard: DeletionGuard | None = build_deletion_guard(
+            self.config,
+            soft_delete_enabled=soft_delete_enabled,
+            workspace_root=str(workspace_root) if workspace_root is not None else None,
+        )
 
     # ---------- 配置 ----------
 
@@ -209,11 +220,23 @@ class PermissionEngine:
             trusted_dirs=self._trusted_dirs,
         )
         self._net_guard = build_net_guard_checker(self.config)
+        self._deletion_guard = build_deletion_guard(
+            self.config,
+            soft_delete_enabled=self._soft_delete_enabled_provider,
+            workspace_root=str(self._workspace_root) if self._workspace_root is not None else None,
+        )
 
-    def update_config(self, config: PermissionsSection | dict[str, Any]) -> None:
-        """热更新配置."""
+    def update_config(
+        self,
+        config: PermissionsSection | dict[str, Any],
+        *,
+        soft_delete_enabled: Any = None,
+    ) -> None:
+        """热更新配置。``soft_delete_enabled`` 为布尔或可调用对象时替换批量删除开关。"""
         self.config = prepare_permissions_for_engine(config)
         self._enabled = self.config.get("enabled", True)
+        if soft_delete_enabled is not None:
+            self._soft_delete_enabled_provider = soft_delete_enabled
         self._rebuild_file_guard()
 
     def update_trusted_dirs(self, trusted_dirs: list[Path]) -> None:
@@ -428,6 +451,25 @@ class PermissionEngine:
                 "[PermissionEngine] permission.net_guard.result tool=%s checked=false reason=disabled",
                 tool_name,
             )
+
+        # 4. Pipeline D：删除数量防护（软删除开启 + 删除数量达阈值 → ASK）
+        if self._deletion_guard is not None:
+            del_result = self._deletion_guard.evaluate(tool_name, tool_args)
+            if del_result is not None:
+                del_rule = del_result.matched_rule or "del_guard"
+                logger.info(
+                    "[PermissionEngine] permission.del_guard.result tool=%s checked=true permission=%s "
+                    "matched_rule=%s external_paths=%s merged_with=%s",
+                    tool_name,
+                    del_result.permission.value,
+                    del_rule,
+                    del_result.external_paths,
+                    permission.value,
+                )
+                permission = tiered_policy_strictest(permission, del_result.permission)
+                matched_rule = f"{matched_rule}|{del_rule}"
+                if del_result.external_paths:
+                    external_paths = del_result.external_paths
 
         if permission == PermissionLevel.ASK or (
             permission == PermissionLevel.UNDETERMINED and strict_tool_command_merge_enabled(self.config)

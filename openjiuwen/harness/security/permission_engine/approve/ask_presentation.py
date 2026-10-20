@@ -68,6 +68,8 @@ _RULE_RISK_LABELS = {
     "shell_privilege_escalation": "提权",
     "shell_fs_recursive_or_forced_delete": "递归或强制删除",
     "shell_ps_recursive_or_forced_delete": "递归或强制删除",
+    "del_guard": "批量删除",
+    "batch_delete": "批量删除",
     "shell_registry_delete": "注册表删除",
     "shell_disk_partition_or_raw_device_write": "磁盘分区或裸设备写入",
     "shell_remote_execution_or_lateral_movement": "远程执行或横向移动",
@@ -84,7 +86,7 @@ _RULE_ID_RE = re.compile(r"(?:builtin|rules)\[([^\]]+)\]")
 _FILE_SUFFIX_RE = re.compile(r"^\.[A-Za-z0-9]{1,15}$")
 _ESCALATING = frozenset({"MEDIUM", "HIGH", "CRITICAL"})
 _ACTION_RANK = {"write": 0, "exec": 1, "read": 2}
-_ACTION_CN = {"read": "读取", "write": "写入", "exec": "执行", "access": "访问"}
+_ACTION_CN = {"read": "读取", "write": "写入", "exec": "执行", "access": "访问", "delete": "删除"}
 _SOURCE_ORDER = {"tool_arg": 0, "shlex": 1, "llm": 2, "script_scan": 3}
 _RISK_RANK = {"低": 0, "中": 1, "高": 2}
 _SEVERITY_LEVEL = {"LOW": "低", "MEDIUM": "中", "HIGH": "高", "CRITICAL": "高"}
@@ -172,9 +174,11 @@ def _file_operations(
     known_paths = {_operation_path_key(path) for path, _, _ in operations}
     action = _PATH_ACTION.get(name, "access")
     action = {"edit": "write", "list": "read"}.get(action, action)
+    # 批量删除审批命中时，目标路径标注为 delete。
+    fallback_action = "delete" if "del_guard" in (result.matched_rule or "") else action
     for path in result.external_paths or []:
         if _operation_path_key(path) not in known_paths:
-            operations.append((str(path), action, "tool_arg"))
+            operations.append((str(path), fallback_action, "tool_arg"))
     operations.sort(key=lambda item: _SOURCE_ORDER.get(item[2], len(_SOURCE_ORDER)))
     seen: set[tuple[str, str]] = set()
     unique: list[tuple[str, str, str]] = []
@@ -338,6 +342,8 @@ def _summary_for_category(
 
 def _risk_title(result: PermissionResult, category: str) -> str:
     rule = (result.matched_rule or "").strip()
+    if "del_guard" in rule:
+        return "检测到批量删除，需要确认后才能执行"
     for rid in _RULE_ID_RE.findall(rule):
         label = _RULE_RISK_LABELS.get(rid)
         if label:
