@@ -41,6 +41,33 @@ from openjiuwen.harness.tools.filesystem import (
     _parse_ps_remove_targets,
     _record_rm_targets_before_deletion,
 )
+from openjiuwen.core.sys_operation.local.file_backup import resolve_file_backup_manager
+
+
+async def _backup_shell_writes(command: str, workdir: str) -> None:
+    """执行前对命令里词法可识别的写路径做快照备份（幂等，失败不阻断）。"""
+    manager = resolve_file_backup_manager()
+    if manager is None or not manager.enabled:
+        return
+    try:
+        from openjiuwen.harness.security.permission_engine.fileguard.path_extract import (
+            extract_shell_path_accesses,
+        )
+
+        accesses = extract_shell_path_accesses(
+            command, workdir, include_cd_reads=False, shell_type="powershell",
+        )
+    except (OSError, RuntimeError, ValueError):
+        return
+    for path, action in accesses:
+        if action != "write":
+            continue
+        try:
+            await manager.backup_before_write(str(path))
+        except Exception:  # noqa: BLE001
+            sys_operation_logger.warning(
+                "[PowerShellTool] backup_before_write failed path=%s", path, exc_info=True,
+            )
 
 
 @dataclass(frozen=True)
@@ -172,6 +199,9 @@ class PowerShellTool(Tool):
             if ps_targets:
                 await _record_rm_targets_before_deletion(_history_path, ps_targets, self._operation)
 
+        # ── pre-execution: snapshot files written by the shell command ─────────
+        await _backup_shell_writes(p.command, resolved_cwd)
+
         res = await self._operation.shell().execute_cmd(
             p.command,
             cwd=resolved_cwd,
@@ -256,6 +286,9 @@ class PowerShellTool(Tool):
             ps_targets = _parse_ps_remove_targets(p.command)
             if ps_targets:
                 await _record_rm_targets_before_deletion(_history_path, ps_targets, self._operation)
+
+        # ── pre-execution: snapshot files written by the shell command ─────────
+        await _backup_shell_writes(p.command, resolved_cwd)
 
         start = time.monotonic()
         accumulated_stdout = ""

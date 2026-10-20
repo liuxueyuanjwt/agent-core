@@ -25,6 +25,7 @@ import pdfplumber
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.session import get_current_session
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.sys_operation.local.file_backup import resolve_file_backup_manager
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
@@ -1187,6 +1188,14 @@ class WriteFileTool(Tool):
             except OSError as exc:
                 return ToolOutput(success=False, error=str(exc))
 
+        # 自动备份：写盘前对已存在文件做一次快照（同一会话内幂等，失败不阻断）。
+        _backup_mgr = resolve_file_backup_manager()
+        if _backup_mgr is not None and operation_type == "update":
+            try:
+                await _backup_mgr.backup_before_write(path)
+            except Exception:  # noqa: BLE001
+                logger.warning("[WriteFileTool] backup_before_write failed path=%s", path, exc_info=True)
+
         res = await self.operation.fs().write_file(
             path,
             content,
@@ -1587,6 +1596,14 @@ class EditFileTool(Tool):
             content, raw = await self._read_existing_text(file_path)
         except OSError as exc:
             return ToolOutput(success=False, error=str(exc))
+
+        # 自动备份：写盘前对已存在文件做一次快照（同一会话内幂等，失败不阻断）。
+        _backup_mgr = resolve_file_backup_manager()
+        if _backup_mgr is not None:
+            try:
+                await _backup_mgr.backup_before_write(file_path)
+            except Exception:  # noqa: BLE001
+                logger.warning("[EditFileTool] backup_before_write failed path=%s", file_path, exc_info=True)
 
         eol = self._detect_eol(raw)
 
