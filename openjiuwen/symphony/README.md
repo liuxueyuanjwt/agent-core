@@ -284,3 +284,31 @@ make type-check
 - Symphony 保持使用方无关，不包含使用方专属的 gateway、Web/TUI、卡片类型或 prompt rail。
 - 使用方负责将 Symphony toolkit 接入自己的调用体系，并将内部能力标识映射为统一能力资产 ID。
 - 初版模块以新的公开路径为准，不提供其他导入路径的兼容层。
+
+## hotfix 分支的任务级专家规划
+
+本分支提供轻量的 `ExpertCandidate`、`OrchestrationPlan` 和 `plan_experts` 接口。
+上文保留 Symphony 的整体设计；本分支当前未实现 `SymphonyRuntime`、能力检索、技能图构建或演进服务。
+任务级专家规划不依赖这些服务，也不新增第三方依赖。
+
+```python
+from openjiuwen.symphony import ExpertCandidate, plan_experts
+
+plan = await plan_experts(
+    query="整理资料并审阅报告",
+    candidates=[
+        ExpertCandidate(id="research", name="资料专家", description="收集、核对和整理资料"),
+        ExpertCandidate(id="review", name="审阅专家", description="检查报告逻辑与事实依据"),
+    ],
+    model=current_session_model,
+    timeout=60,
+)
+```
+
+- 使用调用方传入的当前会话原生 `Model`，有候选时只调用一次 `Model.invoke`；`timeout` 原样传给模型。
+- `skills` 默认为空元组；调用方可只提供专家 ID、名称和职责，省略技能名称。
+- 没有候选时直接返回 `{"status": "no_plan"}`，不调用模型；普通问题、无合适候选或信息不足也可返回 `no_plan`。
+- `ready` 结果包含 `planned_graph`，选择 1 至 7 位候选专家。节点不重复、任务非空，边连接已选专家且不能成环；单专家的边为空。
+- 图中保留小艺Work主理人元数据，主理人不计入专家人数。返回值兼容 `dict`，也可通过 `to_dict()` 转为普通字典。
+- 模型响应经过文本提取和 JSON 修复；无效计划抛出 `ValueError`，框架 `BaseError` 原样传播，其他模型请求错误包装为 `RuntimeError`。
+- 专家发现、绑定、执行和清理由调用方负责；返回计划不表示专家已经执行。旧响应 `needs_input` 归一化为 `no_plan`。
