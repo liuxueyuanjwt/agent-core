@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from openjiuwen.harness.security.permission_engine.approve.ask_presentation import (
     build_permission_ask_presentation,
     render_ask_presentation_message,
@@ -367,3 +369,29 @@ def test_relative_file_operations_bind_to_permission_workspace(tmp_path: Path) -
             "source": "tool_arg",
         }
     ]
+
+
+@pytest.mark.parametrize("explicit_workdir", [False, True])
+def test_interrupt_captures_execution_directory(tmp_path, monkeypatch, explicit_workdir):
+    from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+    from openjiuwen.harness.security.permission_engine.approve import operation_grants
+    from openjiuwen.harness.security.permission_engine.host import ToolPermissionHost
+
+    runtime_dir = tmp_path / "runtime"
+    explicit_dir = tmp_path / "explicit"
+    monkeypatch.setattr(operation_grants, "get_cwd", lambda: str(runtime_dir))
+    args = {"command": "chmod -R a-w relative.txt && echo done", "cwd": "ignored-model-cwd"}
+    if explicit_workdir:
+        args["workdir"] = str(explicit_dir)
+    original = dict(args)
+    rail = PermissionInterruptRail(
+        config={"enabled": True},
+        host=ToolPermissionHost(resolve_workspace_dir=lambda: tmp_path / "workspace"),
+    )
+    metadata = rail._build_interrupt_metadata(
+        SimpleNamespace(name="bash", arguments=args), PermissionResult(PermissionLevel.ASK),
+    )
+    monkeypatch.setattr(operation_grants, "get_cwd", lambda: str(tmp_path / "later"))
+    expected = explicit_dir if explicit_workdir else runtime_dir
+    assert metadata["workdir"] == str(expected.resolve())
+    assert args == original
