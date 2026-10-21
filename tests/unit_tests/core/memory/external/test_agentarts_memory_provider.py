@@ -242,7 +242,7 @@ def test_get_client_uses_sdk_api_key_and_configures_client_endpoint(monkeypatch)
     client = provider._get_client()
 
     assert client is provider._client
-    assert calls == [{"api_key": "k"}]
+    assert calls == [{"api_key": "k", "verify_ssl": False}]
     assert client._data_plane.client._get_base_url() == "https://custom.example.com"
 
 
