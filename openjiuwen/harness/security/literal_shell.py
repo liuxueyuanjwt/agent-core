@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -39,6 +40,22 @@ _INDIRECT_COMMANDS = frozenset({"eval", "exec", "source", ".", "env", "command",
 
 def is_script_interpreter(executable: str) -> bool:
     return executable in _INTERPRETERS or re.fullmatch(r"python\d+(?:\.\d+)*", executable) is not None
+
+
+def _heredoc_commands(
+    node: Any, invocation: Callable[[Any], LiteralCommand | None],
+) -> tuple[LiteralCommand, ...] | None:
+    """Accept a literal call, optionally preceded by exactly one static cd."""
+    if node.type != "list":
+        call = invocation(node)
+        return (call,) if call is not None else None
+    parts = node.children
+    if len(parts) != 3 or parts[1].type != "&&":
+        return None
+    leading_cd, call = invocation(parts[0]), invocation(parts[2])
+    if leading_cd is None or leading_cd.argv[0] != "cd" or call is None:
+        return None
+    return leading_cd, call
 
 
 def parse_literal_shell(command: str) -> LiteralShell | None:
@@ -105,8 +122,9 @@ def parse_literal_shell(command: str) -> LiteralShell | None:
         children = top.named_children
         if len(children) != 2 or children[1].type != "heredoc_redirect":
             return None
-        call = invocation(children[0])
-        if call is None or PurePosixPath(call.argv[0]).name not in {"python", "python3"}:
+        # The parser wraps a leading cd and Python call in the same redirect.
+        calls = _heredoc_commands(children[0], invocation)
+        if not calls or PurePosixPath(calls[-1].argv[0]).name not in {"python", "python3"}:
             return None
         redirect = children[1]
         if any(child.type not in {"heredoc_start", "heredoc_body", "heredoc_end"}
@@ -118,7 +136,7 @@ def parse_literal_shell(command: str) -> LiteralShell | None:
             return None
         if text(end) != text(start)[1:-1] or redirect.children[0].type != "<<":
             return None
-        return LiteralShell((call,), heredoc=True)
+        return LiteralShell(calls, heredoc=True)
 
     def collect(node: Any) -> list[LiteralCommand] | None:
         if node.type == "command":

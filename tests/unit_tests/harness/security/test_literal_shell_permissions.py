@@ -36,6 +36,55 @@ async def test_verified_literal_skill_commands_are_allowed(command):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delimiter", ["'EOF'", '"EOF"'])
+async def test_literal_heredoc_after_leading_cd_is_allowed(delimiter):
+    command = (
+        'cd "./skills/会议预定" && python3 payload_demo.py --mode modify --tool-response-stdin '
+        f'<<{delimiter}\n{{"txBody":{{"descInfo":"交易成功"}}}}\nEOF'
+    )
+    result = await PermissionEngine(config()).check_permission("bash", {"command": command})
+    assert result.is_allowed
+    assert "rules[cd]" in result.matched_rule
+    assert "rules[python]" in result.matched_rule
+
+
+@pytest.mark.parametrize("command", [
+    "cd ./ || python3 probe.py <<'EOF'\n{}\nEOF",
+    "cd ./ && python3 - <<'EOF'\nprint(1)\nEOF",
+    "cd ./ && python3 -c 'print(1)' <<'EOF'\n{}\nEOF",
+    "cd ./ && python3 probe.py <<EOF\n$(id)\nEOF",
+    "cd ./ && python3 probe.py <<'EOF'\n{}\nEOF\ntouch marker",
+    "cd ./ && python3 probe.py > marker <<'EOF'\n{}\nEOF",
+    "cd ./ && python3 probe.py <<'EOF'\n{}\nEOF\n| cat",
+    "cd ./ && cd ../ && python3 probe.py <<'EOF'\n{}\nEOF",
+    "echo prefix && python3 probe.py <<'EOF'\n{}\nEOF",
+    'cd "${DEST}" && python3 probe.py <<\'EOF\'\n{}\nEOF',
+])
+def test_cd_heredoc_does_not_accept_other_shell_structures(command):
+    assert literal_shell.parse_literal_shell(command) is None
+
+
+@pytest.mark.asyncio
+async def test_cd_heredoc_preserves_denies_and_requires_both_command_rules(tmp_path):
+    command = "cd ./ && python3 ../outside.py <<'EOF'\n{}\nEOF"
+    for denied in ("cd", "python"):
+        policy = config()
+        next(rule for rule in policy["rules"] if rule["id"] == denied)["action"] = "deny"
+        assert (await PermissionEngine(policy).check_permission("bash", {"command": command})).is_denied
+    for allowed in ("cd", "python"):
+        policy = config()
+        policy["rules"] = [rule for rule in policy["rules"] if rule["id"] == allowed]
+        assert not (await PermissionEngine(policy).check_permission("bash", {"command": command})).is_allowed
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy = config()
+    policy["file_guard"] = {"enabled": True, "defaults": {"exec": "deny"}, "workspace": {"exec": "allow"}}
+    assert (await PermissionEngine(policy, workspace_root=workspace).check_permission(
+        "bash", {"command": command, "workdir": str(workspace)},
+    )).is_denied
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["0", "123", "-1", "202610190845", "202610190945", "20071276990"])
 async def test_literal_numeric_arguments_are_allowed(value):
     result = await PermissionEngine(config()).check_permission("bash", {
