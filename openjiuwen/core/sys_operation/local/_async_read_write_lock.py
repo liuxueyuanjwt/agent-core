@@ -129,21 +129,22 @@ class HybridAsyncReadWriteLock:
             raise self._timeout() from None
 
     async def _acquire_file(self, mode: Literal["read", "write"], deadline: float) -> None:
-        """Poll without a long-running executor call that could outlive cancellation."""
+        """Poll without a long-running executor call that could outlive cancellation.
+
+        filelock >= 4.x tracks lock ownership by ``asyncio.current_task()``.
+        Wrapping the acquire/release coroutines in ``create_task`` would put the
+        hold in a *different* task from the one that later releases it, so the
+        release would always fail with
+        ``Cannot release a lock ... that is not held by this task``.
+        Because ``timeout=0, blocking=False`` returns instantly, there is no
+        long-running executor call to shield—``await`` directly in the caller's
+        task instead.
+        """
         acquire = self._file.acquire_read if mode == "read" else self._file.acquire_write
         while True:
-            task = asyncio.create_task(acquire(timeout=0, blocking=False))
             try:
-                await asyncio.shield(task)
+                await acquire(timeout=0, blocking=False)
                 return
-            except asyncio.CancelledError:
-                try:
-                    await task
-                except FileLockTimeout:
-                    pass
-                else:
-                    await self._file.release()
-                raise
             except FileLockTimeout:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
@@ -151,30 +152,25 @@ class HybridAsyncReadWriteLock:
                 await asyncio.sleep(min(self._poll_interval, remaining))
 
     async def _release_file(self) -> None:
-        task = asyncio.create_task(self._file.release())
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+        await self._file.release()
 
     @asynccontextmanager
     async def read(self, timeout: float):
         deadline = asyncio.get_running_loop().time() + timeout
         async with self._condition:
             await self._wait_for(lambda: not self._writer and self._writers_waiting == 0, deadline)
-            if self._readers == 0:
-                await self._acquire_file("read", deadline)
+            await self._acquire_file("read", deadline)
             self._readers += 1
 
         try:
             yield
         finally:
-            async with self._condition:
-                self._readers -= 1
-                if self._readers == 0:
-                    await self._release_file()
-                self._condition.notify_all()
+            try:
+                await self._release_file()
+            finally:
+                async with self._condition:
+                    self._readers -= 1
+                    self._condition.notify_all()
 
     @asynccontextmanager
     async def write(self, timeout: float):
