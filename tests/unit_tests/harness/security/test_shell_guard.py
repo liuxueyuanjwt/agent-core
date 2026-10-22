@@ -175,6 +175,47 @@ def test_redirect_no_longer_asks_on_pipeline_a() -> None:
     assert "structure_guard" not in matched
 
 
+def test_extract_rm_targets_are_delete_not_write(tmp_path: Path) -> None:
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    a.write_text("a", encoding="utf-8")
+    b.write_text("b", encoding="utf-8")
+    accesses = extract_shell_path_accesses(
+        f"rm -f {a.as_posix()} {b.as_posix()}",
+        tmp_path,
+        shell_type="auto",
+    )
+    assert any(p.resolve() == a.resolve() and act == "delete" for p, act in accesses)
+    assert any(p.resolve() == b.resolve() and act == "delete" for p, act in accesses)
+    assert all(act != "write" for _p, act in accesses)
+
+
+def test_extract_tee_target_is_write(tmp_path: Path) -> None:
+    target = tmp_path / "README.md"
+    target.write_text("old", encoding="utf-8")
+    accesses = extract_shell_path_accesses(
+        f"echo newcontent | tee {target.as_posix()}",
+        tmp_path,
+        shell_type="auto",
+    )
+    assert any(p.resolve() == target.resolve() and act == "write" for p, act in accesses)
+
+    relative = extract_shell_path_accesses("echo hi | tee out.txt", tmp_path, shell_type="auto")
+    assert any(p.name == "out.txt" and act == "write" for p, act in relative)
+
+
+def test_single_segment_posix_paths_stay_visible(tmp_path: Path) -> None:
+    cases = (
+        ("rm -rf /tmp", "auto", "tmp", "delete"),
+        ("mkdir /srv", "bash", "srv", "write"),
+        ("tee /etc", "auto", "etc", "write"),
+        ("Remove-Item -Path /data", "powershell", "data", "delete"),
+    )
+    for command, shell_type, name, action in cases:
+        accesses = extract_shell_path_accesses(command, tmp_path, shell_type=shell_type)
+        assert any(p.name == name and act == action for p, act in accesses), (command, accesses)
+
+
 def test_extract_bare_redirect_target(tmp_path: Path) -> None:
     accesses = extract_shell_path_accesses("echo hi > output.txt", tmp_path)
     paths = {p.name for p, _act in accesses}

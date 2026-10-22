@@ -453,10 +453,13 @@ class PermissionEngine:
             )
 
         # 4. Pipeline D：删除数量防护（软删除开启 + 删除数量达阈值 → ASK）
+        del_reason: str | None = None
         if self._deletion_guard is not None:
             del_result = self._deletion_guard.evaluate(tool_name, tool_args)
             if del_result is not None:
                 del_rule = del_result.matched_rule or "del_guard"
+                if isinstance(del_result.reason, str) and del_result.reason.strip():
+                    del_reason = del_result.reason.strip()
                 logger.info(
                     "[PermissionEngine] permission.del_guard.result tool=%s checked=true permission=%s "
                     "matched_rule=%s external_paths=%s merged_with=%s",
@@ -480,10 +483,14 @@ class PermissionEngine:
                 permission = PermissionLevel.ALLOW
                 matched_rule = "operation_grant"
 
+        reason = self._get_reason(permission, tool_name, matched_rule)
+        # 批量删除的 N/T 文案只在最终仍需确认时展示；更严格的 DENY 保留拒绝原因。
+        if permission == PermissionLevel.ASK and del_reason and "del_guard" in (matched_rule or ""):
+            reason = del_reason
         result = PermissionResult(
             permission=permission,
             matched_rule=matched_rule,
-            reason=self._get_reason(permission, tool_name, matched_rule),
+            reason=reason,
             external_paths=external_paths,
         )
 

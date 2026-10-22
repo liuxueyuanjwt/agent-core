@@ -54,6 +54,27 @@ def test_at_threshold_asks(tmp_path) -> None:
     assert res is not None
     assert res.permission == PermissionLevel.ASK
     assert res.matched_rule == "del_guard:batch_delete"
+    assert res.reason == "本次操作将删除 5 个文件，达到阈值 5，需要确认"
+
+
+def test_powershell_quoted_comma_list_asks(tmp_path) -> None:
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    a.write_bytes(b"x")
+    b.write_bytes(b"x")
+    guard = build_deletion_guard(_cfg(True, 2))
+    assert guard is not None
+    res = guard.evaluate(
+        "powershell",
+        {
+            "command": f"Remove-Item '{a.as_posix()}','{b.as_posix()}'",
+            "workdir": str(tmp_path),
+        },
+    )
+    assert res is not None
+    assert res.permission == PermissionLevel.ASK
+    assert res.reason == "本次操作将删除 2 个文件，达到阈值 2，需要确认"
+    assert len(res.external_paths or []) == 2
 
 
 def test_non_shell_tool_returns_none(tmp_path) -> None:

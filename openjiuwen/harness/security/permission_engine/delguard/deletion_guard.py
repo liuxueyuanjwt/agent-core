@@ -56,6 +56,14 @@ def _default_soft_delete_enabled(config: Mapping[str, Any] | None) -> bool:
     return section.get("enabled") is True
 
 
+def _shell_type_for_delete(tool_name: str, args: Mapping[str, Any]) -> str:
+    """powershell 工具没有 shell_type 参数，计数仍按 PowerShell 语法拆逗号列表。"""
+    if tool_name in {"powershell", "core.powershell"}:
+        return "powershell"
+    explicit = str(args.get("shell_type") or "").strip().lower()
+    return explicit or "auto"
+
+
 def _fixed_soft_delete_enabled(enabled: bool) -> SoftDeleteEnabledProvider:
     """把布尔开关包成与配置无关的解析器。"""
 
@@ -131,7 +139,7 @@ class DeletionGuard:
             return None
 
         workdir = args.get("workdir") or self._workspace_root
-        shell_type = str(args.get("shell_type") or "auto")
+        shell_type = _shell_type_for_delete(tool_name, args)
 
         try:
             count, hit_paths = count_deletion_targets(command, shell_type, workdir)

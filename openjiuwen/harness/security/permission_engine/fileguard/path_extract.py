@@ -26,6 +26,9 @@ from openjiuwen.harness.security.permission_engine.fileguard.file_tool_specs imp
     FileToolSpec,
     lookup_file_tool_specs,
 )
+from openjiuwen.harness.security.permission_engine.delguard.del_count import (
+    split_shell_operands,
+)
 from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
     canonicalize_shell_command_for_permission,
 )
@@ -34,7 +37,7 @@ from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import 
 
 logger = logging.getLogger(__name__)
 
-FileAction = Literal["read", "write", "exec"]
+FileAction = Literal["read", "write", "exec", "delete"]
 
 _CHAIN_SPLIT_RE = re.compile(r"\s+(?:&&|\|\|)\s+")
 
@@ -43,7 +46,7 @@ _PATH_AWARE_COMMANDS = frozenset({
     "ls", "dir", "type", "del", "erase", "rd", "rmdir", "copy", "move", "md",
     "head", "tail", "more", "less", "vim", "nano", "gedit", "notepad",
     "get-content", "gc",
-    "set-content", "add-content", "out-file", "tee-object", "sc",
+    "set-content", "add-content", "out-file", "tee", "tee-object", "sc",
     "remove-item", "ri", "new-item", "ni",
 })
 
@@ -68,9 +71,13 @@ _READ_CMDS = frozenset({
     "get-content", "gc",
 })
 _WRITE_CMDS = frozenset({
-    "rm", "mkdir", "touch", "chmod", "chown", "del", "erase", "rd", "rmdir", "md",
-    "set-content", "add-content", "out-file", "tee-object", "sc",
-    "remove-item", "ri", "new-item", "ni",
+    "mkdir", "touch", "chmod", "chown", "md",
+    "set-content", "add-content", "out-file", "tee", "tee-object", "sc",
+    "new-item", "ni",
+})
+# 删除不是写：不触发写前备份，审批卡标 delete。file_guard 仍按 write 轴判定。
+_DELETE_CMDS = frozenset({
+    "rm", "del", "erase", "rd", "rmdir", "remove-item", "ri",
 })
 _PS_PATH_FLAGS = frozenset({"-path", "-literalpath", "-filepath"})
 _FD_ALIAS_RE = re.compile(r"^&\d+$")
@@ -132,18 +139,20 @@ def _looks_like_redirect_target(token: str) -> bool:
 
 
 def _collect_ps_path_tokens(tokens: list[str]) -> list[str]:
+    """返回仍带引号的原始词，方便后续按引号外逗号拆 PowerShell 列表。"""
     out: list[str] = []
     first_positional = True
     idx = 1
     while idx < len(tokens):
-        raw = tokens[idx].strip().strip('"').strip("'")
-        flag = raw.lower().split(":")[0]
+        raw = tokens[idx].strip()
+        bare = raw.strip('"').strip("'")
+        flag = bare.lower().split(":")[0]
         if flag in _PS_PATH_FLAGS:
             if idx + 1 < len(tokens):
-                out.append(tokens[idx + 1].strip().strip('"').strip("'"))
+                out.append(tokens[idx + 1].strip())
                 idx += 2
                 continue
-        if raw.startswith("-"):
+        if bare.startswith("-"):
             idx += 1
             continue
         if first_positional and raw:
@@ -169,6 +178,52 @@ def _basename_lower(cmd: str) -> str:
     return base
 
 
+def _split_top_level_pipes(text: str) -> list[str]:
+    """按引号外的 ``|`` / ``|&`` 拆段，不拆 ``||``。"""
+    parts: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "|":
+            if text.startswith("||", i):
+                buf.append("||")
+                i += 2
+                continue
+            i += 2 if text.startswith("|&", i) else 1
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _expand_pipe_segments(segments: list[str]) -> list[str]:
+    expanded: list[str] = []
+    for seg in segments:
+        pipes = _split_top_level_pipes(seg)
+        expanded.extend(pipes if len(pipes) >= 2 else [seg])
+    return expanded
+
+
 def _segments_for_extract(command: str) -> list[str]:
     text = (command or "").strip()
     if not text:
@@ -177,12 +232,14 @@ def _segments_for_extract(command: str) -> list[str]:
     inv = [sc.text.strip() for sc in (pr.subcommands or ()) if sc.text and sc.text.strip()]
     heuristic = [p.strip() for p in _CHAIN_SPLIT_RE.split(text) if p.strip()]
     if len(inv) >= 2:
-        return inv
-    if len(heuristic) >= 2:
-        return heuristic
-    if len(inv) == 1:
-        return inv
-    return [text]
+        chosen = inv
+    elif len(heuristic) >= 2:
+        chosen = heuristic
+    elif len(inv) == 1:
+        chosen = inv
+    else:
+        chosen = [text]
+    return _expand_pipe_segments(chosen)
 
 
 def _path_aware_one_segment(
@@ -219,19 +276,23 @@ def _path_aware_one_segment(
             return
 
     for idx, tok in enumerate(tokens[1:]):
-        tok = tok.strip().strip('"').strip("'")
-        if not tok or _is_shell_flag_token(tok, cmd0=cmd0):
-            continue
-        # Only widen read-command operands; write command values are not paths.
         bare_read_operand = shell_type in {"cmd", "powershell"} and cmd0 in _READ_CMDS
-        _append_path_token(tok, idx, require_path_shape=not bare_read_operand)
+        # tee / Tee-Object 的目标经常是裸文件名，不要求带斜杠。
+        loose_operand = bare_read_operand or cmd0 in {"tee", "tee-object"}
+        for piece in split_shell_operands(tok, shell_type=shell_type, cmd0=cmd0):
+            if _is_shell_flag_token(piece, cmd0=cmd0):
+                continue
+            _append_path_token(piece, idx, require_path_shape=not loose_operand)
 
     if cmd0 in (
         "get-content", "gc", "set-content", "add-content", "out-file",
         "tee-object", "sc", "remove-item", "ri", "new-item", "ni",
     ):
         for extra in _collect_ps_path_tokens(tokens):
-            _append_path_token(extra, len(path_tokens), require_path_shape=False)
+            for piece in split_shell_operands(extra, shell_type=shell_type, cmd0=cmd0):
+                if _is_shell_flag_token(piece, cmd0=cmd0):
+                    continue
+                _append_path_token(piece, len(path_tokens), require_path_shape=False)
 
     results: list[tuple[Path, FileAction]] = []
     new_cwd: Path | None = None
@@ -240,6 +301,9 @@ def _path_aware_one_segment(
         results.append((path_tokens[0][0], "read"))
         for p, _ in path_tokens[1:]:
             results.append((p, "write"))
+    elif cmd0 in _DELETE_CMDS:
+        for p, _ in path_tokens:
+            results.append((p, "delete"))
     elif cmd0 in _WRITE_CMDS:
         for p, _ in path_tokens:
             results.append((p, "write"))

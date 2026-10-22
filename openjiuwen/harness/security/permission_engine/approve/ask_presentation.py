@@ -85,7 +85,7 @@ _RULE_RISK_LABELS = {
 _RULE_ID_RE = re.compile(r"(?:builtin|rules)\[([^\]]+)\]")
 _FILE_SUFFIX_RE = re.compile(r"^\.[A-Za-z0-9]{1,15}$")
 _ESCALATING = frozenset({"MEDIUM", "HIGH", "CRITICAL"})
-_ACTION_RANK = {"write": 0, "exec": 1, "read": 2}
+_ACTION_RANK = {"write": 0, "delete": 0, "exec": 1, "read": 2}
 _ACTION_CN = {"read": "读取", "write": "写入", "exec": "执行", "access": "访问", "delete": "删除"}
 _SOURCE_ORDER = {"tool_arg": 0, "shlex": 1, "llm": 2, "script_scan": 3}
 _RISK_RANK = {"低": 0, "中": 1, "高": 2}
@@ -168,14 +168,26 @@ def _file_operations(
         accesses = extract_accesses_native(extraction_name, args, workspace or Path(get_cwd()), permission_config)
     except (OSError, RuntimeError, ValueError):
         accesses = []
-    operations = [(str(path), action, source) for path, action, source in accesses]
+    operations = [(str(path), op_action, source) for path, op_action, source in accesses]
+    # 批量删除：已经抽到的目标也要标 delete，不能只给“提取漏掉”的路径打补丁。
+    is_batch_delete = "del_guard" in (result.matched_rule or "")
+    delete_keys = {_operation_path_key(path) for path in (result.external_paths or [])}
+    if is_batch_delete:
+        rewritten: list[tuple[str, str, str]] = []
+        for path, op_action, source in operations:
+            if delete_keys:
+                if _operation_path_key(path) in delete_keys:
+                    op_action = "delete"
+            elif op_action == "write":
+                op_action = "delete"
+            rewritten.append((path, op_action, source))
+        operations = rewritten
     # Never lose paths already identified by the permission decision if extraction
     # cannot reproduce them. Unknown actions are explicitly shown as access.
     known_paths = {_operation_path_key(path) for path, _, _ in operations}
     action = _PATH_ACTION.get(name, "access")
     action = {"edit": "write", "list": "read"}.get(action, action)
-    # 批量删除审批命中时，目标路径标注为 delete。
-    fallback_action = "delete" if "del_guard" in (result.matched_rule or "") else action
+    fallback_action = "delete" if is_batch_delete else action
     for path in result.external_paths or []:
         if _operation_path_key(path) not in known_paths:
             operations.append((str(path), fallback_action, "tool_arg"))
@@ -553,7 +565,7 @@ def _shell_file_access_summary(
 
 
 def _is_file_io_access(path: Path, action: str) -> bool:
-    if action in {"write", "exec"}:
+    if action in {"write", "exec", "delete"}:
         return True
     if action != "read":
         return False
