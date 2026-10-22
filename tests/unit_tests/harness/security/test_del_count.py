@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from openjiuwen.harness.security.permission_engine.delguard.del_count import (
     _entry_cost,
     count_deletion_targets,
+    split_shell_operands,
 )
 
 
@@ -96,10 +98,38 @@ def test_count_accumulate_across_commands(tmp_path) -> None:
 def test_count_powershell_remove_item(tmp_path) -> None:
     a = _mk(tmp_path, "a")
     b = _mk(tmp_path, "b")
-    count, _ = count_deletion_targets(
+    count, paths = count_deletion_targets(
         f"Remove-Item {a},{b} -Force", "powershell", str(tmp_path),
     )
-    assert count >= 1  # 逗号分隔在保守解析下至少命中其一；不强制精确
+    assert count == 2
+    assert len(paths) == 2
+
+
+def test_count_powershell_quoted_comma_list_auto(tmp_path) -> None:
+    a = Path(_mk(tmp_path, "a.txt")).as_posix()
+    b = Path(_mk(tmp_path, "b.txt")).as_posix()
+    c = Path(_mk(tmp_path, "c.txt")).as_posix()
+    count, paths = count_deletion_targets(
+        f"Remove-Item '{a}','{b}'", "auto", str(tmp_path),
+    )
+    assert count == 2
+    assert {Path(p).resolve() for p in paths} == {Path(a).resolve(), Path(b).resolve()}
+
+    count3, paths3 = count_deletion_targets(
+        f"Remove-Item '{a}','{b}','{c}'", "auto", str(tmp_path),
+    )
+    assert count3 == 3
+    assert len(paths3) == 3
+
+
+def test_count_quoted_comma_inside_filename_stays_one(tmp_path) -> None:
+    weird = tmp_path / "foo,bar.txt"
+    weird.write_bytes(b"x")
+    count, paths = count_deletion_targets(
+        f"Remove-Item '{weird.as_posix()}'", "auto", str(tmp_path),
+    )
+    assert count == 1
+    assert len(paths) == 1
 
 
 def test_count_cmd_del(tmp_path) -> None:
@@ -125,6 +155,16 @@ def test_count_glob_expand(tmp_path) -> None:
         (tmp_path / f"log{i}.txt").write_bytes(b"x")
     count, _ = count_deletion_targets("rm *.txt", "bash", str(tmp_path))
     assert count == 3
+
+
+def test_posix_single_segment_paths_are_not_cmd_switches() -> None:
+    for token in ("/tmp", "/etc", "/var", "/opt", "/home", "/root", "/usr", "/data", "/srv"):
+        assert split_shell_operands(token, shell_type="auto", cmd0="rm") == [token]
+        assert split_shell_operands(token, shell_type="bash", cmd0="mkdir") == [token]
+        assert split_shell_operands(token, shell_type="powershell", cmd0="remove-item") == [token]
+    assert split_shell_operands("/f", shell_type="cmd", cmd0="del") == []
+    assert split_shell_operands("/q", shell_type="dos", cmd0="erase") == []
+    assert split_shell_operands("-rf", shell_type="bash", cmd0="rm") == []
 
 
 def test_count_unexpanded_var_skip(tmp_path) -> None:

@@ -165,7 +165,7 @@ def test_rd_glued_switches_are_not_paths(tmp_path: Path) -> None:
         f'rd /s/q "{victim.as_posix()}"', tmp_path,
     )
     assert not any("s/q" in str(p).replace("\\", "/") for p, _ in accesses)
-    assert any(p.resolve() == victim.resolve() and act == "write" for p, act in accesses)
+    assert any(p.resolve() == victim.resolve() and act == "delete" for p, act in accesses)
 
 
 def test_del_and_copy_slash_switches_are_not_paths(tmp_path: Path) -> None:
@@ -183,7 +183,7 @@ def test_del_and_copy_slash_switches_are_not_paths(tmp_path: Path) -> None:
             str(p).replace("\\", "/").rstrip("/").lower() in {"/f", "/q", "/y", "c:/f", "c:/q", "c:/y"}
             for p, _ in accesses
         )
-    assert any(p.resolve() == src.resolve() and act == "write" for p, act in del_accesses)
+    assert any(p.resolve() == src.resolve() and act == "delete" for p, act in del_accesses)
     assert any(p.resolve() == src.resolve() and act == "read" for p, act in copy_accesses)
     assert any(p.resolve() == dst.resolve() and act == "write" for p, act in copy_accesses)
 

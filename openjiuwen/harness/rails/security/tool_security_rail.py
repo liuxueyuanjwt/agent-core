@@ -1011,6 +1011,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return {
             "ask_category": presentation.category,
             "ask_title": presentation.title,
+            "ask_reason": result.reason or "",
             "ask_summary": presentation.summary,
             "ask_risk_level": presentation.risk_level,
             "file_operations": [

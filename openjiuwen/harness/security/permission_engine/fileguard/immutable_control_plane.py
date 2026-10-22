@@ -102,7 +102,7 @@ class ImmutableControlPlaneGuard:
             self._permission_config,
         )
         for path, action, _source in accesses:
-            if action not in {"write", "exec"}:
+            if action not in {"write", "exec", "delete"}:
                 continue
             canonical = _canonical(path)
             for root in self._roots:

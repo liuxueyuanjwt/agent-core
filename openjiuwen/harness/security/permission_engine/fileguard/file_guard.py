@@ -610,6 +610,15 @@ def _match_glob(pattern: str, path_posix: str) -> bool:
         return False
 
 
+def _coerce_guard_action(action: str) -> FileGuardAction:
+    """删除会改掉文件，策略轴仍走 write；展示和写前备份则使用独立的 delete。"""
+    if action in {"write", "delete"}:
+        return "write"
+    if action == "exec":
+        return "exec"
+    return "read"
+
+
 def _level_for_action(rule: FileGuardPathRule, action: FileGuardAction) -> PermissionLevel:
     if action == "write":
         return rule.write
@@ -667,7 +676,7 @@ class FileGuardChecker:
             raw = extract_accesses_native(
                 tool_name, dict(tool_args), workspace, self._permission_config,
             )
-            accesses = [(p, act) for p, act, _src in raw]
+            accesses = [(p, _coerce_guard_action(act)) for p, act, _src in raw]
         else:
             paths = extract_paths_legacy(
                 tool_name, dict(tool_args), workspace, self._permission_config,
@@ -736,7 +745,7 @@ class FileGuardChecker:
             raw = extract_accesses_native(
                 tool_name, dict(tool_args), workspace, self._permission_config,
             )
-            accesses = [(p, act) for p, act, _src in raw]
+            accesses = [(p, _coerce_guard_action(act)) for p, act, _src in raw]
         else:
             paths = extract_paths_legacy(
                 tool_name, dict(tool_args), workspace, self._permission_config,

@@ -395,3 +395,30 @@ def test_interrupt_captures_execution_directory(tmp_path, monkeypatch, explicit_
     expected = explicit_dir if explicit_workdir else runtime_dir
     assert metadata["workdir"] == str(expected.resolve())
     assert args == original
+
+
+def test_batch_delete_marks_rm_targets_delete_and_keeps_title(tmp_path: Path) -> None:
+    first = tmp_path / "bd_0.txt"
+    second = tmp_path / "bd_1.txt"
+    first.write_text("a", encoding="utf-8")
+    second.write_text("b", encoding="utf-8")
+    reason = "本次操作将删除 2 个文件，达到阈值 2，需要确认"
+    result = PermissionResult(
+        permission=PermissionLevel.ASK,
+        matched_rule="tools.bash|del_guard:batch_delete",
+        reason=reason,
+        external_paths=[str(first.resolve()), str(second.resolve())],
+    )
+    pres = build_permission_ask_presentation(
+        "bash",
+        {"command": f"rm -f {first.as_posix()} {second.as_posix()}", "workdir": str(tmp_path)},
+        result,
+    )
+    assert pres.title == "检测到批量删除，需要确认后才能执行"
+    assert pres.file_operations
+    assert {action for _path, action, _source in pres.file_operations} == {"delete"}
+    names = {Path(path).name for path, _action, _source in pres.file_operations}
+    assert names == {"bd_0.txt", "bd_1.txt"}
+    message = render_ask_presentation_message(pres)
+    assert "- 删除 " in message
+    assert "写入" not in message.split("涉及的文件操作：", 1)[-1]

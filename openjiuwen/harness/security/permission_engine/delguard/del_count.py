@@ -45,6 +45,9 @@ _SEGMENT_SPLIT_RE = re.compile(r"(?:\r?\n|&&|\|\||;)")
 # 未展开变量外壳（例如 ``$x`` / ``${x}`` / ``%VAR%``）。
 _UNEXPANDED_VAR_RE = re.compile(r"\$(\w+|\{[^}]+\})|%\w+%")
 
+# ``'a','b'`` / ``"a","b"``：引号之间的逗号才是 PowerShell 列表分隔，引号内逗号不是。
+_QUOTED_LIST_GAP_RE = re.compile(r"""['"]\s*,\s*['"]""")
+
 
 def _basename_lower(cmd: str) -> str:
     base = Path(cmd.replace("\\", "/")).name.lower()
@@ -86,16 +89,104 @@ def _split_tokens(segment: str) -> list[str]:
         return segment.strip().split()
 
 
-def _is_flag(token: str) -> bool:
-    """cmd.exe 的 ``/s`` 与 POSIX/PowerShell 的 ``-r`` 都视为旗标，不作为路径。"""
+def _is_flag(token: str, *, shell_type: str = "") -> bool:
+    """``-r`` / ``--force`` 始终是旗标。
+
+    ``/f``、``/s``、``/q`` 这种单词开关只在 cmd.exe 下丢弃。``/tmp``、``/etc``、
+    ``/opt``、``/data`` 是单层 POSIX 路径，不能用同一条正则静默吞掉。
+    """
     t = token.strip().strip('"').strip("'")
     if not t:
         return True
     if t.startswith("-"):
         return True
-    if re.match(r"^/[A-Za-z][A-Za-z0-9]*$", t):
+    if (shell_type or "").strip().lower() in {"cmd", "dos"} and re.match(
+        r"^/[A-Za-z][A-Za-z0-9]*$", t
+    ):
         return True
     return False
+
+
+def _peel_shlex_comma(token: str) -> str:
+    """去掉 ``shlex(posix=False)`` 粘在下一参数上的前导逗号（``,'b'``）。"""
+    raw = token.strip()
+    while raw.startswith(","):
+        nxt = raw[1:].lstrip()
+        if not nxt:
+            return ""
+        if (
+            nxt[0] in "\"'"
+            or re.match(r"^[A-Za-z]:[\\/]", nxt)
+            or nxt.startswith(("\\\\", "./", "../", "/", "\\"))
+        ):
+            raw = nxt
+            continue
+        break
+    return raw
+
+
+def _split_unquoted_commas(token: str) -> list[str]:
+    """按引号外的逗号拆分；引号内逗号保留（``'foo,bar.txt'`` 仍是一个路径）。"""
+    parts: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(token):
+        ch = token[i]
+        if quote:
+            if quote == "'" and token.startswith("''", i):
+                buf.append("'")
+                i += 2
+                continue
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def split_shell_operands(token: str, *, shell_type: str, cmd0: str) -> list[str]:
+    """把一个 shell 词展开成删除/路径操作数。
+
+    PowerShell 的 ``Remove-Item a,b`` 和 ``'a','b'`` 是多个目标。``shlex(posix=False)``
+    会把逗号粘到后一个带引号参数上（``,'b'``），这里先剥掉再按引号外逗号拆开。
+    bash 的普通 ``rm`` 不把文件名里的逗号当成分隔符。
+    """
+    if _is_flag(token, shell_type=shell_type):
+        return []
+    peeled = _peel_shlex_comma(token)
+    if not peeled or _is_flag(peeled, shell_type=shell_type):
+        return []
+    st = (shell_type or "auto").strip().lower()
+    split = (
+        st in {"powershell", "pwsh", "ps"}
+        or cmd0 in {"remove-item", "ri"}
+        or bool(_QUOTED_LIST_GAP_RE.search(peeled))
+    )
+    if split and "," in peeled:
+        return [
+            part for part in _split_unquoted_commas(peeled)
+            if part and not _is_flag(part, shell_type=shell_type)
+        ]
+    return [peeled]
 
 
 def _expand_target(raw: str, base: Path) -> list[Path]:
@@ -196,13 +287,7 @@ def count_deletion_targets(
             continue
         operands: list[str] = []
         for tok in tokens[1:]:
-            if _is_flag(tok):
-                continue
-            # PowerShell 用逗号做数组分隔（如 Remove-Item a,b -Force）。
-            if shell_type.strip().lower() in {"powershell", "pwsh", "ps"} and "," in tok:
-                operands.extend(p for p in tok.split(",") if p.strip())
-            else:
-                operands.append(tok)
+            operands.extend(split_shell_operands(tok, shell_type=shell_type, cmd0=cmd0))
         for tok in operands:
             for candidate in _expand_target(tok, base):
                 key = str(candidate)
