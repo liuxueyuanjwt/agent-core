@@ -311,6 +311,40 @@ class _RecordingAsyncSshModule(ModuleType):
         return self.connection
 
 
+class _RecordingSpanBridge:
+    def __init__(self) -> None:
+        self.enter_count = 0
+        self.exit_count = 0
+
+    def tool_execution_context(self) -> "_RecordingSpanBridge":
+        return self
+
+    def __enter__(self) -> None:
+        self.enter_count += 1
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.exit_count += 1
+
+
+class _TurnRecordingSpanBridge:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self.chunks: list[Any] = []
+        self.finished: list[tuple[str, Any | None]] = []
+
+    def start_turn(self, *, prompt: str) -> None:
+        """Record one turn start."""
+        self.prompts.append(prompt)
+
+    def record_chunk(self, chunk: Any) -> None:
+        """Record one emitted chunk."""
+        self.chunks.append(chunk)
+
+    def finish_turn(self, *, status: str, error: Any | None = None) -> None:
+        """Record one turn finish."""
+        self.finished.append((status, error))
+
+
 class _RecordingTeamLogger:
     def __init__(self) -> None:
         self.errors: list[tuple[str, tuple[Any, ...]]] = []
@@ -318,6 +352,7 @@ class _RecordingTeamLogger:
     def error(self, message: str, *args: Any) -> None:
         """Record one error log call."""
         self.errors.append((message, args))
+
 
 def _ctx(member: str = "claude-1") -> TeamRuntimeContext:
     return TeamRuntimeContext(
@@ -407,6 +442,7 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
     assert options.env["EXTRA"] == "1"
     assert "OPENJIUWEN_TEAM_JOIN" in options.env
     assert options.mcp_servers is None
+    assert options.cli_path is None
     assert options.session_id == build_claude_session_id(team_session_id="sess-1", member_name="claude-1")
     assert options.resume is None
 
@@ -436,6 +472,37 @@ async def test_build_cli_runtime_maps_claude_model_config(fake_claude_sdk):
     flag_settings = json.loads(options.settings)
     assert flag_settings["env"]["ANTHROPIC_BASE_URL"] == "https://gateway.example"
     assert flag_settings["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-test"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_passes_claude_cli_path(fake_claude_sdk):
+    token = set_session_id("sess-1")
+    try:
+        runtime = await spawn_mod.build_cli_runtime(
+            _ctx(),
+            mcp_server_command=("openjiuwen-team-mcp",),
+            cli_path="/opt/claude",
+        )
+    finally:
+        reset_session_id(token)
+
+    assert runtime._options.cli_path == "/opt/claude"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_claude_rejects_full_command_override(fake_claude_sdk):
+    token = set_session_id("sess-1")
+    try:
+        with pytest.raises(BaseError, match="configure cli_path instead"):
+            await spawn_mod.build_cli_runtime(
+                _ctx(),
+                command_override=("claude", "--print"),
+                mcp_server_command=("openjiuwen-team-mcp",),
+            )
+    finally:
+        reset_session_id(token)
 
 
 @pytest.mark.asyncio
@@ -481,16 +548,19 @@ async def test_claude_sdk_runtime_emits_native_team_chunks(fake_claude_sdk):
         "name": "Read",
         "arguments": '{"file_path": "a.py"}',
         "tool_call_id": "toolu_1",
+        "is_team_tool": False,
     }
     assert chunks[3].payload == {
         "tool_name": "Read",
         "result": "file body",
         "tool_call_id": "toolu_1",
+        "is_team_tool": False,
     }
     assert chunks[4].payload == {
         "tool_name": "",
         "result": {"ok": True},
         "tool_call_id": "toolu_2",
+        "is_team_tool": False,
     }
 
 
@@ -560,6 +630,7 @@ async def test_claude_sdk_mcp_tool_set_exposes_team_tools_without_read_inbox(
         db=team_db,
         messager=create_messager(MessagerTransportConfig(backend="inprocess", team_name=descriptor.team_name)),
     )
+    span_bridge = _RecordingSpanBridge()
     tool_set = build_claude_sdk_mcp_tool_set(
         server_name="openjiuwen-team",
         team_backend=team_backend,
@@ -568,6 +639,7 @@ async def test_claude_sdk_mcp_tool_set_exposes_team_tools_without_read_inbox(
         dispatch_mode="autonomous",
         lifecycle="temporary",
         language="cn",
+        span_bridge=span_bridge,
     )
 
     tools = tool_set.server["tools"]
@@ -581,35 +653,138 @@ async def test_claude_sdk_mcp_tool_set_exposes_team_tools_without_read_inbox(
 
     direct = await team_backend.message_manager.get_messages(to_member_name="leader", unread_only=True)
     assert any(message.content == "hi from sdk mcp" for message in direct)
+    assert span_bridge.enter_count == 1
+    assert span_bridge.exit_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_runtime_default_bridge_allows_team_tool_calls(
+    fake_claude_sdk,
+    team_db,
+    make_descriptor,
+):
+    """The runtime-local no-op bridge must not break default SDK MCP tools."""
+    descriptor = make_descriptor(scope="member")
+    team_backend = TeamBackend(
+        team_name=descriptor.team_name,
+        member_name=descriptor.member_name,
+        is_leader=False,
+        db=team_db,
+        messager=create_messager(MessagerTransportConfig(backend="inprocess", team_name=descriptor.team_name)),
+    )
+    runtime = ClaudeSdkRuntime(member_name=descriptor.member_name, options=_FakeOptions())
+    runtime.bind_team_tools(
+        team_backend=team_backend,
+        role="teammate",
+        teammate_mode="build_mode",
+        dispatch_mode="autonomous",
+        lifecycle="temporary",
+        language="cn",
+        team_name=descriptor.team_name,
+    )
+
+    assert runtime._sdk_mcp_tool_set is not None
+    send_message = next(tool for tool in runtime._sdk_mcp_tool_set.server["tools"] if tool.name == "send_message")
+    result = await send_message.handler({"to": "leader", "content": "hi from default bridge"})
+
+    assert "Internal error" not in result["content"][0]["text"]
+    direct = await team_backend.message_manager.get_messages(to_member_name="leader", unread_only=True)
+    assert any(message.content == "hi from default bridge" for message in direct)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_runtime_marks_aborted_turn_without_followup_message(fake_claude_sdk):
+    """Abort after query must not be reported as a successful turn."""
+    span_bridge = _TurnRecordingSpanBridge()
+    runtime = ClaudeSdkRuntime(
+        member_name="claude-1",
+        options=_FakeOptions(),
+        span_bridge=span_bridge,
+    )
+
+    class _AbortAfterQueryClient:
+        async def query(self, prompt: str, session_id: str = "default") -> None:
+            _ = prompt, session_id
+            runtime._abort_requested = True
+
+        async def receive_response(self):
+            if False:
+                yield None
+
+    runtime._client = _AbortAfterQueryClient()
+
+    chunks = [chunk async for chunk in runtime._drive({"query": "run"})]
+
+    assert chunks == []
+    assert span_bridge.prompts == ["run"]
+    assert span_bridge.finished == [("cancelled", None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_runtime_finishes_span_when_generator_closes(fake_claude_sdk):
+    """Closing the async generator mid-turn must close the active span."""
+    span_bridge = _TurnRecordingSpanBridge()
+    runtime = ClaudeSdkRuntime(
+        member_name="claude-1",
+        options=_FakeOptions(),
+        span_bridge=span_bridge,
+    )
+
+    class _HangingClient:
+        async def query(self, prompt: str, session_id: str = "default") -> None:
+            _ = prompt, session_id
+
+        async def receive_response(self):
+            yield _FakeClaudeSdk.AssistantMessage(content=[_FakeClaudeSdk.TextBlock(text="first")])
+            await asyncio.Event().wait()
+
+    runtime._client = _HangingClient()
+
+    stream = runtime._drive({"query": "run"})
+    first = await stream.__anext__()
+    await stream.aclose()
+
+    assert first.payload == {"content": "first", "result_type": "answer"}
+    assert span_bridge.finished == [("cancelled", None)]
 
 
 @pytest.mark.level0
 def test_claude_sdk_runtime_skips_duplicate_tool_result_payload(fake_claude_sdk: Any) -> None:
-    from openjiuwen.agent_teams.external.cli_agent.claude.runtime import _iter_sdk_chunks
+    from openjiuwen.agent_teams.external.cli_agent.claude.runtime import _ClaudeToolMetadata, _iter_sdk_chunks
 
-    tool_names_by_id = {"toolu_1": "Read"}
+    tool_metadata_by_id = {"toolu_1": _ClaudeToolMetadata(tool_name="Read")}
     message = _FakeClaudeSdk.UserMessage(
         content=[_FakeClaudeSdk.ToolResultBlock(tool_use_id="toolu_1", content="visible result")],
         parent_tool_use_id="toolu_1",
         tool_use_result={"duplicated": True},
     )
 
-    chunks = _iter_sdk_chunks(message, 0, tool_names_by_id)
+    chunks = _iter_sdk_chunks(
+        message,
+        0,
+        tool_metadata_by_id,
+        mcp_server_name="openjiuwen-team",
+        team_tool_names={"send_message"},
+    )
 
     assert len(chunks) == 1
     assert chunks[0].payload == {
         "tool_name": "Read",
         "result": "visible result",
         "tool_call_id": "toolu_1",
+        "is_team_tool": False,
     }
-    assert tool_names_by_id == {}
+    assert tool_metadata_by_id == {}
 
 
 @pytest.mark.level0
 def test_claude_sdk_runtime_joins_text_tool_result_blocks(fake_claude_sdk: Any) -> None:
-    from openjiuwen.agent_teams.external.cli_agent.claude.runtime import _iter_sdk_chunks
+    from openjiuwen.agent_teams.external.cli_agent.claude.runtime import _ClaudeToolMetadata, _iter_sdk_chunks
 
-    tool_names_by_id = {"toolu_1": "Read"}
+    tool_metadata_by_id = {"toolu_1": _ClaudeToolMetadata(tool_name="Read")}
     message = _FakeClaudeSdk.UserMessage(
         content=[
             _FakeClaudeSdk.ToolResultBlock(
@@ -622,14 +797,62 @@ def test_claude_sdk_runtime_joins_text_tool_result_blocks(fake_claude_sdk: Any) 
         ],
     )
 
-    chunks = _iter_sdk_chunks(message, 0, tool_names_by_id)
+    chunks = _iter_sdk_chunks(
+        message,
+        0,
+        tool_metadata_by_id,
+        mcp_server_name="openjiuwen-team",
+        team_tool_names={"send_message"},
+    )
 
     assert chunks[0].payload == {
         "tool_name": "Read",
         "result": "first\nsecond",
         "tool_call_id": "toolu_1",
+        "is_team_tool": False,
     }
-    assert tool_names_by_id == {}
+    assert tool_metadata_by_id == {}
+
+
+@pytest.mark.level0
+def test_claude_sdk_runtime_marks_only_current_server_team_tools(fake_claude_sdk: Any) -> None:
+    from openjiuwen.agent_teams.external.cli_agent.claude.runtime import _ClaudeToolMetadata, _iter_sdk_chunks
+
+    tool_metadata_by_id: dict[str, _ClaudeToolMetadata] = {}
+    message = _FakeClaudeSdk.AssistantMessage(
+        content=[
+            _FakeClaudeSdk.ToolUseBlock(
+                id="toolu_1",
+                name="mcp__openjiuwen-team__send_message",
+                input={"to": "leader", "content": "hi"},
+            ),
+            _FakeClaudeSdk.ToolUseBlock(
+                id="toolu_2",
+                name="mcp__other-server__send_message",
+                input={"to": "leader", "content": "hi"},
+            ),
+            _FakeClaudeSdk.ToolUseBlock(
+                id="toolu_3",
+                name="mcp__openjiuwen-team__not_registered",
+                input={},
+            ),
+        ],
+    )
+
+    chunks = _iter_sdk_chunks(
+        message,
+        0,
+        tool_metadata_by_id,
+        mcp_server_name="openjiuwen-team",
+        team_tool_names={"send_message"},
+    )
+
+    assert [chunk.payload["is_team_tool"] for chunk in chunks] == [True, False, False]
+    assert tool_metadata_by_id == {
+        "toolu_1": _ClaudeToolMetadata(tool_name="mcp__openjiuwen-team__send_message", is_team_tool=True),
+        "toolu_2": _ClaudeToolMetadata(tool_name="mcp__other-server__send_message"),
+        "toolu_3": _ClaudeToolMetadata(tool_name="mcp__openjiuwen-team__not_registered"),
+    }
 
 
 @pytest.mark.asyncio
@@ -697,6 +920,45 @@ def test_claude_sdk_ssh_transport_uses_options_cli_path(fake_claude_sdk):
     command = transport._build_command()
 
     assert command[0] == "/remote/bin/claude"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_ssh_transport_uses_exec_by_default(fake_claude_sdk):
+    config = SshTransportConfig(host="127.0.0.1", username="u", password="pw")
+    options = _FakeOptions(cwd="/remote/project", env={"OPENJIUWEN_TEAM_JOIN": "{}"})
+    transport = build_claude_sdk_ssh_transport(prompt=[], options=options, config=config)
+
+    await transport.connect()
+
+    asyncssh_module = sys.modules["asyncssh"]
+    assert isinstance(asyncssh_module, _RecordingAsyncSshModule)
+    command = asyncssh_module.connection.command
+    assert command is not None
+    assert "; exec claude " in command
+
+    await transport.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_ssh_transport_can_disable_exec_and_use_empty_password(fake_claude_sdk):
+    config = SshTransportConfig(host="127.0.0.1", username="u", password="", use_exec=False)
+    options = _FakeOptions(cwd="/remote/project", env={"OPENJIUWEN_TEAM_JOIN": "{}"})
+    transport = build_claude_sdk_ssh_transport(prompt=[], options=options, config=config)
+
+    await transport.connect()
+
+    asyncssh_module = sys.modules["asyncssh"]
+    assert isinstance(asyncssh_module, _RecordingAsyncSshModule)
+    command = asyncssh_module.connection.command
+    assert command is not None
+    assert "; claude " in command
+    assert "; exec claude " not in command
+    assert asyncssh_module.connect_kwargs is not None
+    assert asyncssh_module.connect_kwargs["password"] == ""
+
+    await transport.close()
 
 
 @pytest.mark.asyncio
