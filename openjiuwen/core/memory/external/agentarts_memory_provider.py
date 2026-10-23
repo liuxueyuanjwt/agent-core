@@ -72,6 +72,7 @@ class AgentArtsMemoryProvider(MemoryProvider):
         actor_id: str | None = None,
         assistant_id: str | None = None,
         session_mapping_store: BaseKVStore | None = None,
+        verify_ssl: bool = True,
     ):
         self._base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._api_key = api_key
@@ -85,6 +86,7 @@ class AgentArtsMemoryProvider(MemoryProvider):
         self._session_mapping_store = session_mapping_store or InMemoryKVStore()
         self._initialized = False
         self._consecutive_failures = 0
+        self._verify_ssl = verify_ssl
 
     @property
     def name(self) -> str:
@@ -130,7 +132,7 @@ class AgentArtsMemoryProvider(MemoryProvider):
         try:
             from agentarts.sdk.memory import MemoryClient
 
-            self._client = MemoryClient(api_key=self._api_key, verify_ssl=False)
+            self._client = MemoryClient(api_key=self._api_key, verify_ssl=self._verify_ssl)
         except ImportError as exc:
             raise RuntimeError(
                 f"AgentArts SDK is unavailable. Install with `pip install openjiuwen[{AGENTARTS_EXTRA}]` "

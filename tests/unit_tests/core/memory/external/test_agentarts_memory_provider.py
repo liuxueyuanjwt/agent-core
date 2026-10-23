@@ -243,8 +243,36 @@ def test_get_client_uses_sdk_api_key_and_configures_client_endpoint(monkeypatch)
     client = provider._get_client()
 
     assert client is provider._client
-    assert calls == [{"api_key": "k", "verify_ssl": False}]
+    # Base provider defaults to verify_ssl=True.
+    assert calls == [{"api_key": "k", "verify_ssl": True}]
     assert client._data_plane.client._get_base_url() == "https://custom.example.com"
+
+
+def test_get_client_respects_constructor_verify_ssl_false(monkeypatch):
+    calls = []
+
+    class FakeHttpService:
+        def _get_base_url(self, space_id=None):
+            return "https://original.example.com"
+
+    class FakeMemoryClient:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            self._data_plane = types.SimpleNamespace(client=FakeHttpService())
+
+    memory_module = types.ModuleType("agentarts.sdk.memory")
+    setattr(memory_module, "MemoryClient", FakeMemoryClient)
+    monkeypatch.setitem(sys.modules, "agentarts", types.ModuleType("agentarts"))
+    monkeypatch.setitem(sys.modules, "agentarts.sdk", types.ModuleType("agentarts.sdk"))
+    monkeypatch.setitem(sys.modules, "agentarts.sdk.memory", memory_module)
+
+    provider = AgentArtsMemoryProvider(
+        base_url="https://custom.example.com", api_key="k", space_id="space", verify_ssl=False
+    )
+    client = provider._get_client()
+
+    assert client is provider._client
+    assert calls == [{"api_key": "k", "verify_ssl": False}]
 
 
 def test_missing_sdk_error_is_actionable(monkeypatch):

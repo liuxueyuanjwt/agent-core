@@ -136,6 +136,26 @@ async def test_cloud_handle_tool_call_returns_created_at():
     assert data["results"][0]["created_at"] == "2026-10-22T00:00:00Z"
 
 
+def test_cloud_get_client_defaults_verify_ssl_false():
+    # Cloud provider overrides the base default (True) → must pass verify_ssl=False.
+    provider = OfficeAceMemoryCloudProvider(api_key="k", space_id="s")
+    assert provider._verify_ssl is False
+    client = provider._get_client()
+
+    assert client is provider._client
+    assert provider._client.init_kwargs == {"api_key": "k", "verify_ssl": False}
+
+
+def test_cloud_constructor_allows_explicit_verify_ssl_true():
+    # Explicit verify_ssl=True is respected (e.g. for debugging against a real cert).
+    provider = OfficeAceMemoryCloudProvider(api_key="k", space_id="s", verify_ssl=True)
+    assert provider._verify_ssl is True
+    client = provider._get_client()
+
+    assert client is provider._client
+    assert provider._client.init_kwargs == {"api_key": "k", "verify_ssl": True}
+
+
 # ---------------------------------------------------------------------------
 # PC provider — httpx stubbed
 # ---------------------------------------------------------------------------
