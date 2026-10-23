@@ -35,12 +35,13 @@ class _FakeCloudClient:
         self.search_calls.append(kwargs)
 
         class _Record:
-            def __init__(self, content: str):
+            def __init__(self, content: str, created_at: str = "2026-10-22T00:00:00Z"):
                 self.content = content
+                self.created_at = created_at
 
         class _Result:
-            def __init__(self, content: str, score: float):
-                self.record = _Record(content)
+            def __init__(self, content: str, score: float, created_at: str = "2026-10-22T00:00:00Z"):
+                self.record = _Record(content, created_at)
                 self.score = score
 
         class _Resp:
@@ -122,6 +123,19 @@ async def test_cloud_search_still_uses_sdk():
     assert "cloud-fact" in out
 
 
+@pytest.mark.asyncio
+async def test_cloud_handle_tool_call_returns_created_at():
+    provider = OfficeAceMemoryCloudProvider(api_key="k", space_id="s")
+    await provider.initialize(user_id="u", session_id="sess")
+    provider._client = _FakeCloudClient()
+
+    data = json.loads(
+        await provider.handle_tool_call("external_memory_search", {"query": "hello"})
+    )
+    assert data["results"][0]["memory"] == "cloud-fact"
+    assert data["results"][0]["created_at"] == "2026-10-22T00:00:00Z"
+
+
 # ---------------------------------------------------------------------------
 # PC provider — httpx stubbed
 # ---------------------------------------------------------------------------
@@ -142,7 +156,7 @@ class _FakeAsyncClient:
 
     last: dict | None = None
     next_response: _FakeResponse = _FakeResponse(
-        200, {"results": [{"content": "pc-fact", "score": 0.8}]}
+        200, {"results": [{"content": "pc-fact", "score": 0.8, "created_at": "2026-10-22T00:00:00Z"}]}
     )
 
     def __init__(self, *args: Any, **kwargs: Any):
@@ -163,7 +177,7 @@ class _FakeAsyncClient:
 def _reset_fake_async_client():
     _FakeAsyncClient.last = None
     _FakeAsyncClient.next_response = _FakeResponse(
-        200, {"results": [{"content": "pc-fact", "score": 0.8}]}
+        200, {"results": [{"content": "pc-fact", "score": 0.8, "created_at": "2026-10-22T00:00:00Z"}]}
     )
     yield
     _FakeAsyncClient.last = None
@@ -205,6 +219,32 @@ async def test_pc_search_posts_to_appapi_search_and_adds_x_chat_user_id(patch_ht
     assert headers["X-Chat-User-Id"] == "user-42"
     assert _FakeAsyncClient.last["json"]["query"] == "hello"
     assert "pc-fact" in out
+
+
+@pytest.mark.asyncio
+async def test_pc_handle_tool_call_returns_created_at(patch_httpx):
+    provider = OfficeAceMemoryPcProvider(api_key="k", actor_id="u")
+    await provider.initialize(user_id="u", session_id="t")
+
+    data = json.loads(
+        await provider.handle_tool_call("external_memory_search", {"query": "q"})
+    )
+    assert data["results"][0]["memory"] == "pc-fact"
+    assert data["results"][0]["created_at"] == "2026-10-22T00:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_pc_handle_tool_call_normalizes_missing_created_at(patch_httpx):
+    _FakeAsyncClient.next_response = _FakeResponse(
+        200, {"results": [{"content": "pc-fact", "score": 0.8}]}
+    )
+    provider = OfficeAceMemoryPcProvider(api_key="k", actor_id="u")
+    await provider.initialize(user_id="u", session_id="t")
+
+    data = json.loads(
+        await provider.handle_tool_call("external_memory_search", {"query": "q"})
+    )
+    assert data["results"][0]["created_at"] == ""
 
 
 @pytest.mark.asyncio

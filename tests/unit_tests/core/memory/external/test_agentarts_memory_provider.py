@@ -18,13 +18,14 @@ from openjiuwen.core.memory.external import AgentArtsMemoryProvider
 
 
 class FakeRecord:
-    def __init__(self, content: str):
+    def __init__(self, content: str, created_at: str = "2026-10-22T00:00:00Z"):
         self.content = content
+        self.created_at = created_at
 
 
 class FakeSearchResult:
-    def __init__(self, content: str, score: float):
-        self.record = FakeRecord(content)
+    def __init__(self, content: str, score: float, created_at: str = "2026-10-22T00:00:00Z"):
+        self.record = FakeRecord(content, created_at)
         self.score = score
 
 
@@ -355,12 +356,32 @@ async def test_search_tool_returns_json_results_and_filters():
     assert data["count"] == 1
     assert data["results"][0]["memory"] == "remember this"
     assert data["results"][0]["score"] == 0.91
+    assert data["results"][0]["created_at"] == "2026-10-22T00:00:00Z"
     filters = fake.search_calls[-1]["filters"]
     assert filters.query == "x"
     assert filters.top_k == 2
     assert filters.strategy_type == "semantic"
     assert filters.min_score == 0.7
     assert filters.actor_id == "u1"
+
+
+@pytest.mark.asyncio
+async def test_search_tool_normalizes_missing_created_at_to_empty_string():
+    # FakeRecord defaults created_at to a timestamp; override to "" to model
+    # records without a creation time. _search must coerce that to "".
+    provider = AgentArtsMemoryProvider(api_key="k", space_id="space")
+    fake = FakeAgentArtsClient(
+        search_response=FakeSearchResponse(
+            results=[FakeSearchResult("no-timestamp memory", 0.8, created_at="")],
+        ),
+    )
+    provider._client = fake
+    await provider.initialize(session_id="search-session")
+
+    data = json.loads(
+        await provider.handle_tool_call("external_memory_search", {"query": "x"})
+    )
+    assert data["results"][0]["created_at"] == ""
 
 
 @pytest.mark.asyncio
