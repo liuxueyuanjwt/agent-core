@@ -960,8 +960,39 @@ class _JiuwenBoxProviderMixin:
         for provider in providers:
             # These IDs were derived from the shared lifecycle, not new explicit
             # bindings. Retained cards must not resurrect them after eviction.
-            provider._sandbox_id = None
-            provider._launcher_extra_params().pop("sandbox_id", None)
+            provider.invalidate_cached_sandbox()
+
+    def invalidate_cached_sandbox(self) -> None:
+        """Forget the sandbox ID derived from this provider's shared lifecycle."""
+        self._sandbox_id = None
+        self._launcher_extra_params().pop("sandbox_id", None)
+
+    @classmethod
+    async def recreate_sandbox(
+        cls, base_url: str, *, shared_key: Optional[str], policy: dict | None, policy_mode: str | None,
+        timeout_seconds: float, preserve_files_upload: Any, extra_stale_sandbox_ids: Sequence[str] | None,
+        lifecycle_hook: Optional[Callable[[str, dict], None]], reason: str,
+    ) -> str:
+        """Track recreation until its worker finishes, even if the caller cancels."""
+        with cls._shared_lock:
+            cls._assert_not_deleting_locked(shared_key or base_url.rstrip("/"))
+            task = asyncio.create_task(_force_recreate_jiuwenbox_sandbox(
+                base_url, shared_key=shared_key, policy=policy, policy_mode=policy_mode,
+                timeout_seconds=timeout_seconds, preserve_files_upload=preserve_files_upload,
+                extra_stale_sandbox_ids=extra_stale_sandbox_ids, lifecycle_hook=lifecycle_hook, reason=reason,
+            ))
+            cls._inflight_recreations.add(task)
+
+        def finished(done: asyncio.Task[str]) -> None:
+            with cls._shared_lock:
+                cls._inflight_recreations.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(finished)
+        # Cancelling the caller cannot cancel a worker thread already creating a
+        # remote sandbox. Keep its full publication/cleanup visible to bulk delete.
+        return await asyncio.shield(task)
 
     @classmethod
     async def delete_all_sandboxes(cls, **kwargs) -> list[str]:
@@ -1499,26 +1530,11 @@ async def force_recreate_jiuwenbox_sandbox(
     Returns:
         New sandbox_id to write back to launcher_config.extra_params["sandbox_id"].
     """
-    cls = _JiuwenBoxProviderMixin
-    with cls._shared_lock:
-        cls._assert_not_deleting_locked(shared_key or base_url.rstrip("/"))
-        task = asyncio.create_task(_force_recreate_jiuwenbox_sandbox(
-            base_url, shared_key=shared_key, policy=policy, policy_mode=policy_mode,
-            timeout_seconds=timeout_seconds, preserve_files_upload=preserve_files_upload,
-            extra_stale_sandbox_ids=extra_stale_sandbox_ids, lifecycle_hook=lifecycle_hook, reason=reason,
-        ))
-        cls._inflight_recreations.add(task)
-
-    def finished(done: asyncio.Task[str]) -> None:
-        with cls._shared_lock:
-            cls._inflight_recreations.discard(done)
-        if not done.cancelled():
-            done.exception()
-
-    task.add_done_callback(finished)
-    # Cancelling the caller cannot cancel a worker thread already creating a
-    # remote sandbox. Keep its full publication/cleanup visible to bulk delete.
-    return await asyncio.shield(task)
+    return await _JiuwenBoxProviderMixin.recreate_sandbox(
+        base_url, shared_key=shared_key, policy=policy, policy_mode=policy_mode,
+        timeout_seconds=timeout_seconds, preserve_files_upload=preserve_files_upload,
+        extra_stale_sandbox_ids=extra_stale_sandbox_ids, lifecycle_hook=lifecycle_hook, reason=reason,
+    )
 
 
 async def _force_recreate_jiuwenbox_sandbox(
