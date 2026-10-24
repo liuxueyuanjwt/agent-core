@@ -26,7 +26,10 @@ async def test_ready_plan_uses_selected_model_and_builds_dependency_graph():
     model = FakeModel(
         {
             "status": "ready",
-            "nodes": [{"id": "a", "task": "整理资料"}, {"id": "b", "task": "根据资料审阅"}],
+            "nodes": [
+                {"id": "a", "task": "整理资料", "summary": "梳理报告所需资料与关键依据"},
+                {"id": "b", "task": "根据资料审阅", "summary": "核对资料并审阅报告结论"},
+            ],
             "edges": [{"source": "a", "target": "b"}],
         }
     )
@@ -35,12 +38,19 @@ async def test_ready_plan_uses_selected_model_and_builds_dependency_graph():
 
     assert len(model.calls) == 1
     assert model.calls[0]["timeout"] == 60
+    assert "用日常中文说清这位专家要做什么" in model.calls[0]["messages"][0]["content"]
+    assert "避免使用 SWOT、GTM 等未解释的缩写或专业术语" in model.calls[0]["messages"][0]["content"]
     assert json.loads(model.calls[0]["messages"][1]["content"])["query"] == "完成报告"
     assert plan["status"] == "ready"
     graph = plan["graph"]
     assert graph["type"] == "planned_graph" and graph["directed"] is True
     assert graph["metadata"]["leader"]["id"] == "xiaoyiwork"
     assert graph["nodes"]["a"]["task"] == "整理资料"
+    assert "summary" not in graph["nodes"]["a"]
+    assert plan["display_summaries"] == {
+        "a": "梳理报告所需资料与关键依据",
+        "b": "核对资料并审阅报告结论",
+    }
     assert graph["edges"] == [{"source": "a", "target": "b", "relation": "can_feed"}]
 
 
@@ -73,6 +83,33 @@ async def test_one_selected_expert_produces_ready_plan(candidate_ids):
     assert graph["metadata"]["leader"]["id"] == "xiaoyiwork"
     assert graph["nodes"] == {"a": {"label": "专家a", "description": "职责a", "task": "整理资料"}}
     assert graph["edges"] == []
+    assert "display_summaries" not in plan
+
+
+@pytest.mark.asyncio
+async def test_invalid_display_summaries_do_not_change_executable_plan():
+    model = FakeModel(
+        {
+            "status": "ready",
+            "nodes": [
+                {"id": "a", "task": "完整任务甲", "summary": "  分析  市场机会  "},
+                {"id": "b", "task": "完整任务乙", "summary": "乙" * 81},
+                {"id": "c", "task": "完整任务丙", "summary": 42},
+            ],
+            "edges": [],
+        }
+    )
+
+    plan = await plan_experts("完成报告", _candidates("a", "b", "c"), model)
+
+    assert len(model.calls) == 1
+    assert plan["display_summaries"] == {"a": "分析 市场机会"}
+    assert [plan["graph"]["nodes"][key]["task"] for key in ("a", "b", "c")] == [
+        "完整任务甲",
+        "完整任务乙",
+        "完整任务丙",
+    ]
+    assert all("summary" not in node for node in plan["graph"]["nodes"].values())
 
 
 @pytest.mark.asyncio
