@@ -118,6 +118,8 @@ Creates a new sandbox, updates the shared cache, and attempts to delete stale sa
 
 **Returns**: The new sandbox ID.
 
+Cancelling the caller does not hide an already-started remote recreation: its task finishes publication/cleanup in the background and remains visible to bulk deletion until completion.
+
 ## async function delete_jiuwenbox_sandbox
 
 ```python
@@ -137,6 +139,8 @@ Deletes remote sandboxes associated with the in-process cache. An explicit `sand
 Cached lifecycle callbacks receive `before_delete` and `after_delete`. A remote deletion failure is logged and processing continues; the return value contains only successfully deleted sandbox IDs. With `raise_on_error=True`, a `RuntimeError` preserves the original deletion failure as its cause.
 
 Failed deletions retain the cache and callback as pending cleanup. Reuse and automatic recreation are blocked until explicit deletion retry succeeds. A successful `before_delete` is not repeated on retry; `after_delete` runs once after successful deletion. A failing after-hook does not restore a deleted entry.
+
+Bulk cleanup gates new sandbox acquisitions, waits for initial creations and automatic recreations already in progress, then includes their returned IDs in deletion. This also applies to external services: strict success cannot precede cleanup of a sandbox whose creation request was already sent. A failed DELETE retains the returned ID as pending for retry. Gateway endpoints/providers and their derived launcher IDs are invalidated even when deletion fails, so later session rebuilds resolve the current endpoint and policy rather than reviving an old provider. Other sandbox types are unaffected.
 
 ## class JiuwenBoxFSProvider
 
@@ -342,6 +346,8 @@ async def retire_jiuwenbox_service(base_url: str) -> list[str]
 ```
 
 Hosts may call this only after confirming that their owned service process has exited and its child processes have been torn down. Use the same event loop as the provider's in-flight deletion tasks and await completion before starting replacement sandboxes. A connection error, timeout, or changed URL alone does not prove service exit; unreachable external services retain strict DELETE/retry behavior.
+
+Retirement also invalidates Gateway endpoint/provider caches and derived launcher IDs for the exact service URL. Other URLs remain cached. Reusing the same isolation key after a stop, including on the same port, resolves a fresh provider with the current configuration.
 
 Retirement repeatedly joins in-flight deletes for that URL, including tasks registered while a previous join was awaiting. If concurrent teardown reaches an identity during local batch cleanup, retirement waits for that task and then applies stopped-service semantics instead of inheriting its transport failure or repeating hooks for an already completed identity. Retirement initiates no HTTP request to the stopped endpoint; requests already issued by other callers are allowed to finish. It clears shared IDs, creation locks/failures, hooks, and idle-timeout state for that URL only, returning the retired sandbox IDs. Hooks retain their strict failure semantics. For ordinary disable/restart cleanup, use `delete_jiuwenbox_sandbox(delete_all=True, raise_on_error=True)` to include cached and pending entries across all process-known historical URLs. Failed remote deletions remain pending for retry.
 

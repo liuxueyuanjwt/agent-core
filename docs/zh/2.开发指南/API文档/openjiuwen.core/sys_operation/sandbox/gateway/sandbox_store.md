@@ -126,3 +126,7 @@ class InMemorySandboxStore(AbstractSandboxStore)
 ```
 
 内存中的沙箱存储实现。
+
+### items
+
+`items() -> list[tuple[str, SandboxRecord]]` 返回 isolation key 与记录的快照，供进程内缓存清理使用；不移除记录，也不访问远端服务。

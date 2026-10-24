@@ -53,7 +53,7 @@ from openjiuwen.core.sys_operation.result import (
     WriteFileResult,
 )
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
-from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint
+from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint, SandboxGateway
 from openjiuwen.core.sys_operation.sandbox.providers.base_provider import (
     BaseCodeProvider,
     BaseFSProvider,
@@ -573,6 +573,9 @@ class _JiuwenBoxProviderMixin:
     # so retries never pick up a hook registered later under the same key.
     _pending_deletions: ClassVar[Dict[tuple[str, str], tuple[bool, Optional[Callable[[str, dict], None]]]]] = {}
     _delete_tasks: ClassVar[Dict[tuple[str, str], asyncio.Task[None]]] = {}
+    # A bulk cleanup must also drain creates that have not published an ID yet.
+    _bulk_deletions: ClassVar[int] = 0
+    _inflight_recreations: ClassVar[set[asyncio.Task[str]]] = set()
     # Lazy class-level asyncio.Lock serializes sandbox recreate under concurrent ops.
     _recreate_lock: ClassVar[Optional[asyncio.Lock]] = None
     _recreate_lock_init: ClassVar[threading.Lock] = threading.Lock()
@@ -889,6 +892,7 @@ class _JiuwenBoxProviderMixin:
         else:
             shared_key = self._shared_scope_key()
             with self._shared_lock:
+                self._assert_not_deleting_locked(shared_key)
                 self._shared_sandbox_ids[shared_key] = self._sandbox_id
                 self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
         return self._sandbox_id
@@ -896,7 +900,13 @@ class _JiuwenBoxProviderMixin:
     @classmethod
     def _assert_not_deleting(cls, shared_key: str) -> None:
         with cls._shared_lock:
-            pending = [sid for key, sid in cls._pending_deletions if key == shared_key]
+            cls._assert_not_deleting_locked(shared_key)
+
+    @classmethod
+    def _assert_not_deleting_locked(cls, shared_key: str) -> None:
+        if cls._bulk_deletions:
+            raise RuntimeError("jiuwenbox sandbox bulk deletion is pending")
+        pending = [sid for key, sid in cls._pending_deletions if key == shared_key]
         if pending:
             raise RuntimeError(f"jiuwenbox sandbox deletion is pending: {', '.join(pending)}")
 
@@ -918,6 +928,7 @@ class _JiuwenBoxProviderMixin:
         base_url = base_url.rstrip("/")
         if not base_url:
             raise ValueError("retired service base_url must be non-empty")
+        await cls._invalidate_gateway_cache(base_url)
         while True:
             with cls._shared_lock:
                 tasks = [task for (key, _), task in cls._delete_tasks.items() if key.split("|", 1)[0] == base_url]
@@ -939,7 +950,75 @@ class _JiuwenBoxProviderMixin:
                     cls._lifecycle_hooks.pop(key, None)
         with cls._idle_timeout_cache_lock:
             cls._idle_timeout_cache.pop(base_url, None)
+        # Old tool requests can resolve a provider while deletion hooks await.
+        await cls._invalidate_gateway_cache(base_url)
         return deleted
+
+    @staticmethod
+    async def _invalidate_gateway_cache(base_url: Optional[str] = None) -> None:
+        providers = await SandboxGateway.get_instance().invalidate_sandbox_cache("jiuwenbox", base_url)
+        for provider in providers:
+            # These IDs were derived from the shared lifecycle, not new explicit
+            # bindings. Retained cards must not resurrect them after eviction.
+            provider.invalidate_cached_sandbox()
+
+    def invalidate_cached_sandbox(self) -> None:
+        """Forget the sandbox ID derived from this provider's shared lifecycle."""
+        self._sandbox_id = None
+        self._launcher_extra_params().pop("sandbox_id", None)
+
+    @classmethod
+    async def recreate_sandbox(
+        cls, base_url: str, *, shared_key: Optional[str], policy: dict | None, policy_mode: str | None,
+        timeout_seconds: float, preserve_files_upload: Any, extra_stale_sandbox_ids: Sequence[str] | None,
+        lifecycle_hook: Optional[Callable[[str, dict], None]], reason: str,
+    ) -> str:
+        """Track recreation until its worker finishes, even if the caller cancels."""
+        with cls._shared_lock:
+            cls._assert_not_deleting_locked(shared_key or base_url.rstrip("/"))
+            task = asyncio.create_task(_force_recreate_jiuwenbox_sandbox(
+                base_url, shared_key=shared_key, policy=policy, policy_mode=policy_mode,
+                timeout_seconds=timeout_seconds, preserve_files_upload=preserve_files_upload,
+                extra_stale_sandbox_ids=extra_stale_sandbox_ids, lifecycle_hook=lifecycle_hook, reason=reason,
+            ))
+            cls._inflight_recreations.add(task)
+
+        def finished(done: asyncio.Task[str]) -> None:
+            with cls._shared_lock:
+                cls._inflight_recreations.discard(done)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(finished)
+        # Cancelling the caller cannot cancel a worker thread already creating a
+        # remote sandbox. Keep its full publication/cleanup visible to bulk delete.
+        return await asyncio.shield(task)
+
+    @classmethod
+    async def delete_all_sandboxes(cls, **kwargs) -> list[str]:
+        """Gate new acquisitions, drain lazy creation, then delete its results."""
+        with cls._shared_lock:
+            cls._bulk_deletions += 1
+            creation_locks = list(cls._creation_locks.values())
+            recreations = list(cls._inflight_recreations)
+
+        def drain_creations() -> None:
+            for lock in creation_locks:
+                with lock:
+                    pass
+
+        try:
+            # Existing creators publish their ID while holding these locks.
+            # Queued/new creators observe the gate before sending HTTP.
+            await asyncio.gather(*(asyncio.shield(task) for task in recreations), return_exceptions=True)
+            await asyncio.to_thread(drain_creations)
+            return await cls.delete_cached_sandboxes(delete_all=True, **kwargs)
+        finally:
+            try:
+                await cls._invalidate_gateway_cache()
+            finally:
+                with cls._shared_lock:
+                    cls._bulk_deletions -= 1
 
     @classmethod
     async def delete_cached_sandboxes(
@@ -1451,6 +1530,18 @@ async def force_recreate_jiuwenbox_sandbox(
     Returns:
         New sandbox_id to write back to launcher_config.extra_params["sandbox_id"].
     """
+    return await _JiuwenBoxProviderMixin.recreate_sandbox(
+        base_url, shared_key=shared_key, policy=policy, policy_mode=policy_mode,
+        timeout_seconds=timeout_seconds, preserve_files_upload=preserve_files_upload,
+        extra_stale_sandbox_ids=extra_stale_sandbox_ids, lifecycle_hook=lifecycle_hook, reason=reason,
+    )
+
+
+async def _force_recreate_jiuwenbox_sandbox(
+    base_url: str, *, shared_key: str | None, policy: dict | None, policy_mode: str | None,
+    timeout_seconds: float, preserve_files_upload: Any, extra_stale_sandbox_ids: Sequence[str] | None,
+    lifecycle_hook: Optional[Callable[[str, dict], None]], reason: str,
+) -> str:
     create_options: dict[str, Any] = {}
     if policy is not None:
         create_options["policy"] = policy
@@ -1541,7 +1632,8 @@ async def delete_jiuwenbox_sandbox(
     Args:
         sandbox_id: Explicit remote id to delete; otherwise resolve from the cache.
         shared_key: Scoped cache key (``base_url|isolation_key``).
-        delete_all: When True, delete every cached sandbox in this process.
+        delete_all: Drain in-flight creations and delete all cached/pending
+            sandboxes in this process, invalidating their Gateway caches.
         reason: Passed to delete hook context; default "teardown".
         timeout_seconds: HTTP client timeout.
         raise_on_error: Attempt all matching entries, then propagate the first
@@ -1551,10 +1643,11 @@ async def delete_jiuwenbox_sandbox(
     Returns:
         sandbox_ids successfully deleted, in order.
     """
-    return await _JiuwenBoxProviderMixin.delete_cached_sandboxes(
+    delete = (_JiuwenBoxProviderMixin.delete_all_sandboxes if delete_all
+              else _JiuwenBoxProviderMixin.delete_cached_sandboxes)
+    return await delete(
         sandbox_id=sandbox_id,
         shared_key=shared_key,
-        delete_all=delete_all,
         reason=reason,
         timeout_seconds=timeout_seconds,
         raise_on_error=raise_on_error,

@@ -497,6 +497,8 @@ async def force_recreate_jiuwenbox_sandbox(
 
 * **str**：新建沙箱的 `sandbox_id`。
 
+调用方取消不会隐藏已经发出的远端重建：重建任务在后台完成状态发布及清理，批量删除仍会等待它结束。
+
 ### async delete_jiuwenbox_sandbox
 
 ```
@@ -524,6 +526,8 @@ async def delete_jiuwenbox_sandbox(
 
 远端删除失败时保留缓存与钩子，标记为待清理；显式重试删除成功前，不允许复用或自动重建该作用域沙箱。单条失败不跳过其余匹配条目，成功项立即收敛，失败项留待重试；批量严格清理最终仍报错，宿主不得进入创建阶段。重试不重复执行已成功的 `before_delete`，删除成功后执行一次 `after_delete`；后置钩子失败不恢复已删除条目。
 
+批量清理期间阻止新的沙箱获取，等待已经发出的首次创建和自动重建完成，再将其返回的 ID 纳入删除。external 服务同样适用：创建请求已经发出但尚未返回 ID 时，严格清理不能提前成功；DELETE 失败仍保留该 ID 为 pending，供重试。无论删除是否成功，都会释放 Gateway 的 endpoint / provider 缓存及其派生的 launcher ID，后续会话重建重新解析当前端口和策略，不再复活旧 provider。其他沙箱类型不受影响。
+
 **返回**：
 
 * **list[str]**：成功删除的 `sandbox_id` 列表（按顺序）。
@@ -535,6 +539,8 @@ async def retire_jiuwenbox_service(base_url: str) -> list[str]
 ```
 
 仅供宿主管理服务生命周期时调用，必须与 provider 的在途删除任务使用同一事件循环。宿主必须已经确认**自己管理的旧服务进程退出，并完成其子进程回收**，并在启动替代沙箱前等待本函数完成。连接失败、超时或 URL 变化均不能作为调用依据；外部服务不可达仍走严格删除与待删除重试。
+
+退役同时释放精确匹配该服务 URL 的 Gateway endpoint / provider 缓存及派生的 launcher ID，保留其他 URL。停止后复用相同 isolation key（包括重新使用原端口）也会按当前配置解析新 provider。
 
 该函数循环等待对应 URL 的在途删除，包含等待期间新登记的任务。批量本地收敛若遇到并发 teardown，先等待该 identity 的任务结束，再按服务已退出的语义处理；不会复用远端任务的传输错误或重复执行已完成条目的钩子。retire 自身不向已退出的旧端点发请求，但其他调用方已发出的请求仍需等待结束。随后收敛共享 ID、创建锁 / 失败记录、钩子与 idle-timeout 缓存。其他 URL 不受影响，生命周期钩子仍按严格语义执行。返回已收敛的沙箱 ID 列表。普通 disable / restart 应通过 `delete_jiuwenbox_sandbox(delete_all=True)` 覆盖进程内所有历史 URL 的缓存和待删除记录，不能只按当前配置 URL 弹出 ID 后自行发送 DELETE。
 

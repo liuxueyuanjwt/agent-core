@@ -61,6 +61,10 @@ class InMemorySandboxStore(AbstractSandboxStore):
     async def hdel(self, key: str) -> Optional[SandboxRecord]:
         return self._records.pop(key, None)
 
+    def items(self) -> list[tuple[str, SandboxRecord]]:
+        """Snapshot resolved endpoints for process-local cache invalidation."""
+        return list(self._records.items())
+
     async def flushdb(self) -> List[SandboxRecord]:
         records = list(self._records.values())
         self._records.clear()

@@ -126,3 +126,7 @@ class InMemorySandboxStore(AbstractSandboxStore)
 ```
 
 In-memory sandbox store implementation.
+
+### items
+
+`items() -> list[tuple[str, SandboxRecord]]` returns a snapshot of isolation keys and records for process-local cache invalidation. It does not remove records or contact remote services.

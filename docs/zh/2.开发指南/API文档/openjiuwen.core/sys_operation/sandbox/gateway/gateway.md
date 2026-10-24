@@ -133,6 +133,14 @@ async release_sandbox(isolation_key: str, on_stop: str = "delete") -> GatewayRes
 
 **[GatewayResponse](#class-gatewayresponse)**，操作结果。
 
+### async invalidate_sandbox_cache
+
+```python
+async invalidate_sandbox_cache(sandbox_type: str, base_url: str | None = None) -> list[Any]
+```
+
+释放指定沙箱类型的 endpoint / provider 缓存；可通过 `base_url` 限定精确匹配的服务 URL（忽略末尾斜杠）。不发送远端删除或暂停请求，保留其他沙箱类型和 URL。返回被移除的 provider，供生命周期管理方清理派生状态。此接口仅释放缓存，不能替代严格远端清理。
+
 ### async pause_sandbox
 
 ```python
