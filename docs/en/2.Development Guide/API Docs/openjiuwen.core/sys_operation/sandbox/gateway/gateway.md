@@ -133,6 +133,14 @@ Release sandbox resource, execute deletion, pausing, or keeping based on strateg
 
 **[GatewayResponse](#class-gatewayresponse)**, operation result.
 
+### async invalidate_sandbox_cache
+
+```python
+async invalidate_sandbox_cache(sandbox_type: str, base_url: str | None = None) -> list[Any]
+```
+
+Forget resolved endpoints and providers for the specified sandbox type, optionally restricted to an exact service URL (trailing slashes are ignored). Sends no remote delete/pause request and preserves other sandbox types and URLs. Returns the evicted providers so their lifecycle owner can clear derived state. This is cache invalidation, not a substitute for strict remote cleanup.
+
 ### async pause_sandbox
 
 ```python
