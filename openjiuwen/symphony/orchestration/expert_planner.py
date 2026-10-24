@@ -22,9 +22,12 @@ _PLAN_PROMPT = """你为主助手规划本轮专家协作；主助手负责执�
 普通问答、无需专家或没有合适候选时返回 no_plan；不要为了组团增加专家。
 信息不足且无法合理规划时返回 no_plan，由主助手在普通对话中决定是否追问用户。
 需要专家时返回 ready，选择完成任务所需的最少专家（1 至 7 位），为每位写具体任务。
+同时为每位已选专家写一条仅供确认界面展示的 summary：概括本轮分工，目标 30 至 50 字，
+最多 80 字，用日常中文说清这位专家要做什么，避免使用 SWOT、GTM 等未解释的缩写或专业术语。
+不重复专家姓名，不增加 task 之外的职责；task 仍保留执行所需的完整内容。
 一位专家足够时只选一位，edges 返回空数组；主助手是主理人，不计入所选专家人数。
 多位专家时用有向边表达前置专家结果流向后续专家。只能使用给定 id，不得形成环。
-格式：{"status":"ready|no_plan","nodes":[{"id":"专家id","task":"具体任务"}],
+格式：{"status":"ready|no_plan","nodes":[{"id":"专家id","task":"具体任务","summary":"展示分工"}],
 "edges":[{"source":"专家id","target":"专家id"}]}。"""
 
 
@@ -68,6 +71,7 @@ def _validate_plan(raw: Any, candidates: dict[str, ExpertCandidate]) -> Orchestr
         raise ValueError("expert plan edges must be a list")
 
     nodes: dict[str, dict[str, str]] = {}
+    display_summaries: dict[str, str] = {}
     for item in raw_nodes:
         if not isinstance(item, dict):
             raise ValueError("invalid expert plan node")
@@ -82,6 +86,11 @@ def _validate_plan(raw: Any, candidates: dict[str, ExpertCandidate]) -> Orchestr
             "description": candidate.description,
             "task": task.strip(),
         }
+        raw_summary = item.get("summary")
+        if isinstance(raw_summary, str):
+            summary = " ".join(raw_summary.split())
+            if summary and len(summary) <= 80:
+                display_summaries[expert_id] = summary
 
     edges: list[dict[str, str]] = []
     predecessors: dict[str, set[str]] = {expert_id: set() for expert_id in nodes}
@@ -110,6 +119,7 @@ def _validate_plan(raw: Any, candidates: dict[str, ExpertCandidate]) -> Orchestr
     return OrchestrationPlan(
         {
             "status": "ready",
+            **({"display_summaries": display_summaries} if display_summaries else {}),
             "graph": {
                 "id": uuid4().hex,
                 "type": "planned_graph",
