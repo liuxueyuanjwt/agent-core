@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .transformers_logit_selection import TransformersLogitSelectionClient
+
 if TYPE_CHECKING:
     from .base import (
         CandidateEncodingError,
@@ -29,7 +31,6 @@ if TYPE_CHECKING:
     from .config import LLMClientConfig, OpenAIClientConfig, TransformersClientConfig, VLLMClientConfig
     from .factory import coerce_generation_client, create_progressive_client, progressive_client_cache_key
     from .openai_api import OpenAICompatibleClient
-    from .transformers_logit_selection import TransformersLogitSelectionClient
     from .transformers_prefix_cached_generation import (
         DistributedGenerationConfig,
         TransformersPrefixCachedGenerationClient,
@@ -62,7 +63,7 @@ __all__ = [
     "ProgressiveLLMClient",
     "QueryTooLongForPrefixCache",
     "TransformersClientConfig",
-    "TransformersLogitSelectionClient",
+    TransformersLogitSelectionClient.__name__,
     "TransformersPrefixCachedGenerationClient",
     "TrieConstraint",
     "UnsupportedCapability",
@@ -124,10 +125,6 @@ def __getattr__(name: str):
             "TransformersPrefixCachedGenerationClient": TransformersPrefixCachedGenerationClient,
         }
         return exports.get(name)
-    if name == "TransformersLogitSelectionClient":
-        from .transformers_logit_selection import TransformersLogitSelectionClient
-
-        return TransformersLogitSelectionClient
     if name in {"LocalVLLMClient", "LocalVLLMPrefixCacheHandle"}:
         from .vllm import LocalVLLMClient, LocalVLLMPrefixCacheHandle
 

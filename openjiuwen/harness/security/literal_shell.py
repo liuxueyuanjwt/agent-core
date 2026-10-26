@@ -68,7 +68,7 @@ def parse_literal_shell(command: str) -> LiteralShell | None:
     try:
         source = command.strip().encode("utf-8")
         root = parser.parse(source).root_node
-    except (ValueError, RuntimeError, UnicodeError):
+    except (ValueError, RuntimeError):
         return None
     if root.has_error or len(root.children) != 1 or len(root.named_children) != 1:
         return None

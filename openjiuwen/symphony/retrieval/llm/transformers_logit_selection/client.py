@@ -38,7 +38,7 @@ class TransformersLogitSelectionClient(ProgressiveLLMClient):
         device: str = "auto",
         dtype: str = "auto",
         generation_client: ProgressiveLLMClient | None = None,
-    ) -> "TransformersLogitSelectionClient":
+    ) -> TransformersLogitSelectionClient:
         try:
             import torch
             from transformers import AutoModelForCausalLM
@@ -236,4 +236,4 @@ class TransformersLogitSelectionClient(ProgressiveLLMClient):
             self.generation_client.close()
 
 
-__all__ = ["TransformersLogitSelectionClient"]
+__all__ = [TransformersLogitSelectionClient.__name__]
