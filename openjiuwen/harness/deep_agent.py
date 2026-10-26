@@ -7,6 +7,7 @@ import asyncio
 import copy
 import dataclasses
 import os
+import sys
 import uuid
 from contextlib import suppress
 import warnings
@@ -432,11 +433,7 @@ class DeepAgent(BaseAgent):
                     else client_cfg.client_provider
                 )
         new_react_config.max_iterations = (
-            # ISS-4993: the task loop needs headroom, not infinity — a
-            # bounded ceiling guarantees a runaway loop still terminates.
-            config.task_loop_max_iterations
-            if config.enable_task_loop
-            else config.max_iterations
+            sys.maxsize if config.enable_task_loop else config.max_iterations
         )
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
@@ -880,11 +877,7 @@ class DeepAgent(BaseAgent):
 
         react_config = ReActAgentConfig()
         react_config.max_iterations = (
-            # ISS-4993: the task loop needs headroom, not infinity — a
-            # bounded ceiling guarantees a runaway loop still terminates.
-            cfg.task_loop_max_iterations
-            if cfg.enable_task_loop
-            else cfg.max_iterations
+            sys.maxsize if cfg.enable_task_loop else cfg.max_iterations
         )
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
@@ -3057,13 +3050,35 @@ class DeepAgent(BaseAgent):
             )
 
     async def aclose(self) -> None:
-        """Extend :meth:`BaseAgent.aclose` to the wrapped react agent and subagents.
+        """Extend :meth:`BaseAgent.aclose` to session-scoped tasks, the wrapped
+        react agent and subagents.
 
         Rails register on both this agent's callback manager and the inner
         ``_react_agent``'s one, so both namespaces must be cleared; cached
         subagent controls for every parent session are cancelled as well.
+        Session-scoped asyncio tasks must be stopped too — the eviction path
+        only cleared callbacks/tools, leaving per-session consumers pending
+        forever (issue#5240 residual: SubscriptionInMemory._consume_message
+        1.7x/session + supervisor/forwarder/scheduler ~0.3x each, ~13MB/h):
+        ``stop()`` cancels the interaction loops and emit tasks, and each
+        controller's ``stop()`` shuts the task scheduler and the event-queue
+        subscriptions.
         """
         await super().aclose()
+        try:
+            await self.stop()
+        except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+            logger.warning("[DeepAgent] aclose: stop loops failed: %s", exc)
+        controllers = []
+        for owner in (self, self._react_agent):
+            ctl = getattr(owner, "_loop_controller", None) or getattr(owner, "_controller", None)
+            if ctl is not None and ctl not in controllers:
+                controllers.append(ctl)
+        for ctl in controllers:
+            try:
+                await ctl.stop()
+            except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+                logger.warning("[DeepAgent] aclose: controller stop failed: %s", exc)
         react_agent = self._react_agent
         if react_agent is not None and react_agent is not self:
             try:

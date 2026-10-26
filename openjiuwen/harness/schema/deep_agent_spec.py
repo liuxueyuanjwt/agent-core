@@ -145,6 +145,10 @@ class VisionModelSpec(BaseModel):
     base_url: str = DEFAULT_OPENAI_BASE_URL
     model: str = DEFAULT_OPENAI_VISION_MODEL
     max_retries: int = 3
+    #: Auth headers for session-mode accounts (mirror of the dataclass field);
+    #: without this the dataclass → spec → dataclass round-trip silently drops
+    #: the headers and team/member agents lose vision authentication.
+    default_headers: Optional[dict[str, str]] = None
 
     def build(self) -> VisionModelConfig:
         return VisionModelConfig(**self.model_dump())
@@ -442,12 +446,6 @@ class DeepAgentSpec(BaseModel):
     enable_security_rail: bool = True
     enable_tool_resilience_rail: bool = True
     max_iterations: int = 15
-    task_loop_max_iterations: int = 1000
-    """Upper bound on ReAct iterations when ``enable_task_loop`` is on.
-
-    Replaces the unbounded ``sys.maxsize`` the task loop used to install
-    (ISS-4993): the loop gets generous headroom but a guaranteed stop.
-    """
     workspace: Optional[WorkspaceSpec] = None
     cwd: Optional[str] = None
     """Shell working directory / relative-path base. Defaults to the workspace root."""
@@ -475,7 +473,7 @@ class DeepAgentSpec(BaseModel):
     enable_task_planning: bool = False
     restrict_to_sandbox: bool = False
     auto_create_workspace: bool = True
-    completion_timeout: float = 600.0
+    completion_timeout: float | None = 600.0
     progressive_tool: Optional[ProgressiveToolSpec] = None
     approval_required_tools: Optional[list[str]] = None
     context_engine_config: Optional[Any] = None
@@ -589,7 +587,6 @@ class DeepAgentSpec(BaseModel):
             enable_security_rail=self.enable_security_rail,
             enable_tool_resilience_rail=self.enable_tool_resilience_rail,
             max_iterations=self.max_iterations,
-            task_loop_max_iterations=self.task_loop_max_iterations,
             workspace=workspace,
             cwd=self.cwd,
             project_root=self.project_root,
